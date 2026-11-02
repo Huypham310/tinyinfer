@@ -1,0 +1,7 @@
+#pragma once
+
+namespace tinyinfer {
+
+inline constexpr const char* kVersion = "@PROJECT_VERSION@";
+
+}  // namespace tinyinfer
