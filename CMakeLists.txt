@@ -27,6 +27,9 @@ configure_file(include/tinyinfer/version.hpp.in
 
 add_library(tinyinfer
   src/cpu_features.cpp
+  src/layout.cpp
+  src/shape.cpp
+  src/tensor.cpp
 )
 target_include_directories(tinyinfer
   PUBLIC
