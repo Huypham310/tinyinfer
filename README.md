@@ -24,6 +24,17 @@ The reference workload is the ResNet-18 land-use classifier from
 - Benchmarks (Google Benchmark) and roofline analysis
 - Python bindings via pybind11
 
+## Tensors
+
+- `AlignedBuffer`: zero-initialized storage aligned to 64 bytes (one cache line, one AVX-512
+  register) and padded to a multiple of 64, so vector loops can always load a full register.
+- `Tensor`: dense row-major tensor (`float32`, `int8`, `int32`, `int64`) that shares its
+  storage on copy; `reshape` is a view, `clone` a real copy, and typed access checks the dtype.
+- `to_blocked` / `from_blocked`: NCHW <-> NCHWc. Channels are grouped in blocks of 8 (AVX2) or
+  16 (AVX-512) that become the innermost dimension, so a convolution kernel can load the same
+  pixel of a whole channel block with one aligned vector load. Missing channels in the last block
+  are zero, so they don't change dot products.
+
 ## Build
 
 Requirements: CMake 3.24+, Ninja, and GCC 12+ or Clang 16+ (MSVC should work but is not the

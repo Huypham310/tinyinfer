@@ -12,6 +12,7 @@ FetchContent_MakeAvailable(googletest)
 
 add_executable(tinyinfer_tests
   test_cpu_features.cpp
+  test_tensor.cpp
 )
 target_link_libraries(tinyinfer_tests PRIVATE tinyinfer tinyinfer_warnings GTest::gtest_main)
 
