@@ -12,9 +12,13 @@ FetchContent_MakeAvailable(googletest)
 
 add_executable(tinyinfer_tests
   test_cpu_features.cpp
+  test_onnx.cpp
   test_tensor.cpp
+  test_wire.cpp
 )
 target_link_libraries(tinyinfer_tests PRIVATE tinyinfer tinyinfer_warnings GTest::gtest_main)
+target_compile_definitions(tinyinfer_tests PRIVATE
+  TINYINFER_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data")
 
 include(GoogleTest)
 gtest_discover_tests(tinyinfer_tests)
