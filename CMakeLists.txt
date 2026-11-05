@@ -28,6 +28,8 @@ configure_file(include/tinyinfer/version.hpp.in
 add_library(tinyinfer
   src/cpu_features.cpp
   src/layout.cpp
+  src/onnx/model.cpp
+  src/onnx/wire.cpp
   src/shape.cpp
   src/tensor.cpp
 )
