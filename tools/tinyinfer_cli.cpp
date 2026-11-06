@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "tinyinfer/cpu_features.hpp"
+#include "tinyinfer/kernels.hpp"
 #include "tinyinfer/onnx/model.hpp"
 #include "tinyinfer/version.hpp"
 
@@ -19,6 +20,7 @@ namespace {
 void print_usage() {
     std::cout << "usage: tinyinfer [--info] [--version]\n"
                  "       tinyinfer inspect <model.onnx> [--nodes]\n"
+                 "       tinyinfer bench-gemm\n"
                  "  --info     show detected CPU SIMD features\n"
                  "  --version  print version\n"
                  "  inspect    parse an ONNX model and summarize it (--nodes lists every node)\n";
@@ -94,9 +96,46 @@ int inspect(const char* path, bool list_nodes) {
     return 0;
 }
 
+/// Best-of-`reps` GFLOP/s for an n x n x n GEMM (2 n^3 flops).
+template <class F>
+double gflops(int n, int reps, F&& run) {
+    double best = 1e30;
+    for (int r = 0; r < reps; ++r) {
+        const auto t0 = std::chrono::steady_clock::now();
+        run();
+        best = std::min(best, std::chrono::duration<double>(std::chrono::steady_clock::now() - t0)
+                                  .count());
+    }
+    return 2.0 * n * n * n / best / 1e9;
+}
+
+int bench_gemm() {
+    namespace k = tinyinfer::kernels;
+    std::cout << "    n    naive GFLOP/s   blocked GFLOP/s   speedup\n";
+    for (int n : {128, 256, 512, 1024}) {
+        std::vector<float> a(static_cast<std::size_t>(n) * n), b(a.size()), c(a.size());
+        for (std::size_t i = 0; i < a.size(); ++i) {
+            a[i] = static_cast<float>(i % 7) * 0.1F;
+            b[i] = static_cast<float>(i % 5) * 0.2F;
+        }
+        // the naive loop at n = 1024 takes ~10 s, one run is plenty
+        const double naive = gflops(n, n >= 1024 ? 1 : 3, [&] {
+            k::gemm_naive(n, n, n, a.data(), n, b.data(), n, false, c.data(), n);
+        });
+        const double blocked = gflops(n, 5, [&] {
+            k::gemm(n, n, n, a.data(), n, b.data(), n, false, c.data(), n);
+        });
+        std::cout << std::setw(5) << n << std::fixed << std::setprecision(2) << std::setw(16)
+                  << naive << std::setw(18) << blocked << std::setw(9) << std::setprecision(1)
+                  << blocked / naive << "x\n";
+    }
+    return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
+    if (argc >= 2 && std::strcmp(argv[1], "bench-gemm") == 0) return bench_gemm();
     if (argc < 2) {
         print_usage();
         return 0;
