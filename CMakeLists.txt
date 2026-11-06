@@ -27,6 +27,9 @@ configure_file(include/tinyinfer/version.hpp.in
 
 add_library(tinyinfer
   src/cpu_features.cpp
+  src/kernels/conv.cpp
+  src/kernels/gemm.cpp
+  src/kernels/ops.cpp
   src/layout.cpp
   src/onnx/model.cpp
   src/onnx/wire.cpp
