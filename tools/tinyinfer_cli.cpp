@@ -10,6 +10,10 @@
 #include <string>
 #include <vector>
 
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
 #include "tinyinfer/cpu_features.hpp"
 #include "tinyinfer/kernels.hpp"
 #include "tinyinfer/onnx/model.hpp"
@@ -111,24 +115,63 @@ double gflops(int n, int reps, F&& run) {
 
 int bench_gemm() {
     namespace k = tinyinfer::kernels;
-    std::cout << "    n    naive GFLOP/s   blocked GFLOP/s   speedup\n";
-    for (int n : {128, 256, 512, 1024}) {
+    const std::string original = k::gemm_isa();
+    const double peak2 = k::fma_peak_gflops("avx2");
+    const double peak512 = k::fma_peak_gflops("avx512");
+    std::cout << std::fixed << std::setprecision(1) << "FMA peak, one core: avx2 " << peak2
+              << " GFLOP/s, avx512 " << peak512 << " GFLOP/s\n"
+              << "GFLOP/s, one core (n x n x n):\n"
+              << "    n    naive   scalar     avx2   avx512   avx512 % of peak\n";
+#ifdef _OPENMP
+    omp_set_num_threads(1);  // the per-ISA table is single-core
+#endif
+    for (int n : {128, 256, 512, 1024, 2048}) {
         std::vector<float> a(static_cast<std::size_t>(n) * n), b(a.size()), c(a.size());
         for (std::size_t i = 0; i < a.size(); ++i) {
             a[i] = static_cast<float>(i % 7) * 0.1F;
             b[i] = static_cast<float>(i % 5) * 0.2F;
         }
-        // the naive loop at n = 1024 takes ~10 s, one run is plenty
-        const double naive = gflops(n, n >= 1024 ? 1 : 3, [&] {
-            k::gemm_naive(n, n, n, a.data(), n, b.data(), n, false, c.data(), n);
-        });
-        const double blocked = gflops(n, 5, [&] {
+        std::cout << std::setw(5) << n;
+        if (n <= 512) {
+            const double naive = gflops(n, 3, [&] {
+                k::gemm_naive(n, n, n, a.data(), n, b.data(), n, false, c.data(), n);
+            });
+            std::cout << std::setw(9) << naive;
+        } else {
+            std::cout << std::setw(9) << "-";  // minutes at this size, skip
+        }
+        double last = 0.0;
+        for (const char* isa : {"scalar", "avx2", "avx512"}) {
+            if (!k::set_gemm_isa(isa)) {
+                std::cout << std::setw(9) << "n/a";
+                continue;
+            }
+            last = gflops(n, n >= 2048 ? 2 : 5, [&] {
+                k::gemm(n, n, n, a.data(), n, b.data(), n, false, c.data(), n);
+            });
+            std::cout << std::setw(9) << last;
+        }
+        std::cout << std::setw(14) << (peak512 > 0 ? 100.0 * last / peak512 : 0.0) << "%\n";
+    }
+    k::set_gemm_isa(original.c_str());
+
+#ifdef _OPENMP
+    // multithreaded scaling at one size; physical cores matter more than logical ones
+    const int n = 2048;
+    std::vector<float> a(static_cast<std::size_t>(n) * n, 0.1F), b(a.size(), 0.2F), c(a.size());
+    std::cout << "\nOpenMP scaling, n = " << n << " (" << k::gemm_isa() << "):\n";
+    double one = 0.0;
+    for (int threads : {1, 2, 4, 8, 12, 24}) {
+        omp_set_num_threads(threads);
+        const double g = gflops(n, 3, [&] {
             k::gemm(n, n, n, a.data(), n, b.data(), n, false, c.data(), n);
         });
-        std::cout << std::setw(5) << n << std::fixed << std::setprecision(2) << std::setw(16)
-                  << naive << std::setw(18) << blocked << std::setw(9) << std::setprecision(1)
-                  << blocked / naive << "x\n";
+        if (threads == 1) one = g;
+        std::cout << std::setw(4) << threads << " threads: " << std::setw(7) << g
+                  << " GFLOP/s  (" << std::setprecision(1) << g / one << "x)\n";
     }
+    omp_set_num_threads(omp_get_num_procs());
+#endif
     return 0;
 }
 
