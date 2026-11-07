@@ -27,6 +27,15 @@ void gemm_naive(int m, int n, int k, const float* a, int lda, const float* b, in
 void gemm(int m, int n, int k, const float* a, int lda, const float* b, int ldb, bool trans_b,
           float* c, int ldc, bool accumulate = false);
 
+/// Micro-kernel `gemm` currently uses: "avx512", "avx2" or "scalar". Picked from CPUID on first
+/// use (the env var TINYINFER_ISA overrides it).
+const char* gemm_isa();
+/// Switch the micro-kernel; false (and no change) if this CPU can't run that ISA.
+bool set_gemm_isa(const char* isa);
+/// Measured single-core FMA throughput (GFLOP/s) of a register-only loop for "avx2" or
+/// "avx512": the practical peak the GEMM is compared against. 0 if unsupported.
+double fma_peak_gflops(const char* isa);
+
 // ---- Convolution --------------------------------------------------------------------------------
 
 struct Conv2dParams {

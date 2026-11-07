@@ -93,6 +93,40 @@ The naive loop falls off a cliff as soon as a column of B stops fitting in cache
 step jumps a full row); the blocked one holds ~49 GFLOP/s up to 512 and drops at 1024, which
 is the next thing to look at alongside the AVX2 / AVX-512 micro-kernels.
 
+## SIMD and threads
+
+The GEMM micro-kernel is picked at runtime from CPUID (override with `TINYINFER_ISA=scalar|avx2|avx512`):
+
+| ISA | Tile | Registers | Built with |
+|---|---|---|---|
+| scalar | 4 x 16 | whatever GCC auto-vectorizes for baseline x86-64 | default flags |
+| AVX2 + FMA | 6 x 16 | 12 ymm accumulators + 2 B + 1 broadcast (15 / 16) | `-mavx2 -mfma` on that file only |
+| AVX-512 | 12 x 32 | 24 zmm accumulators + 2 B + 1 broadcast (27 / 32) | `-mavx512f -mfma` on that file only |
+
+Only the micro-kernel files are compiled with wide ISAs, so the library still runs on any x86-64 CPU. `bench-gemm` also measures the practical FMA peak with a register-only loop, so "% of peak" is against what this core actually does, not a datasheet number.
+
+```text
+$ tinyinfer bench-gemm            # Ryzen AI 9 HX 370, one core unless noted
+FMA peak, one core: avx2 158.4 GFLOP/s, avx512 159.3 GFLOP/s
+    n    naive   scalar     avx2   avx512   avx512 % of peak
+  256      3.4     49.6    133.1    134.3          84.3%
+  512      2.1     49.7    139.5    143.6          90.2%
+ 1024        -     48.1    137.9    140.6          88.3%
+ 2048        -     47.6    133.0    134.2          84.3%
+
+OpenMP scaling, n = 2048 (avx512):
+   1 threads:   135.4 GFLOP/s  (1.0x)
+   2 threads:   260.4 GFLOP/s  (1.9x)
+   4 threads:   464.6 GFLOP/s  (3.4x)
+   8 threads:   311.4 GFLOP/s  (2.3x)
+  24 threads:   538.7 GFLOP/s  (4.0x)
+```
+
+- **~90% of the core's FMA peak** at n = 512 with either vector kernel, ~50x the textbook triple loop.
+- **AVX-512 doesn't beat AVX2 here**: both peaks are 159 GFLOP/s because mobile Zen 5 executes 512-bit ops on 256-bit units. The wider kernel still helps a little (fewer instructions and broadcasts per flop).
+- **The AVX2 kernel first ran at half speed.** Written with `__m256 acc[6][2]`, GCC kept the accumulator array in memory (the edge-tile path stores it) and wrote all 12 registers back to the stack on every k step, so the loop was bound by the store port: 66 GFLOP/s with the data in L1. Twelve named accumulator variables fixed it: 155 GFLOP/s in L1. Found by reading the generated assembly.
+- **Threads**: B is packed once per block by all threads together, then each thread packs and multiplies its own row blocks (`schedule(dynamic)`). Scaling is near-linear on the 4 big Zen 5 cores; past that the chip's other 8 cores are Zen 5c in a separate cluster with its own L3, and 8 threads land partly on SMT siblings sharing FMA units, so 8 threads is *slower* than 4. All 24 threads reach ~540-650 GFLOP/s.
+
 ## Build
 
 Requirements: CMake 3.24+, Ninja, and GCC 12+ or Clang 16+ (MSVC should work but is not the
