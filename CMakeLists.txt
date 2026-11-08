@@ -9,6 +9,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(TINYINFER_BUILD_TESTS "Build unit tests" ON)
 option(TINYINFER_NATIVE "Compile with -march=native" OFF)
+option(TINYINFER_OPENMP "Multithread GEMM with OpenMP" ON)
 
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
@@ -29,6 +30,8 @@ add_library(tinyinfer
   src/cpu_features.cpp
   src/kernels/conv.cpp
   src/kernels/gemm.cpp
+  src/kernels/gemm_avx2.cpp
+  src/kernels/gemm_avx512.cpp
   src/kernels/ops.cpp
   src/layout.cpp
   src/onnx/model.cpp
@@ -42,8 +45,29 @@ target_include_directories(tinyinfer
     ${CMAKE_CURRENT_BINARY_DIR}/generated
 )
 target_link_libraries(tinyinfer PRIVATE tinyinfer_warnings)
+if(TINYINFER_OPENMP)
+  find_package(OpenMP)
+  if(OpenMP_CXX_FOUND)
+    target_link_libraries(tinyinfer PUBLIC OpenMP::OpenMP_CXX)
+  endif()
+endif()
 if(TINYINFER_NATIVE AND NOT MSVC)
   target_compile_options(tinyinfer PRIVATE -march=native)
+endif()
+
+# Only the micro-kernel files get the wide ISAs; everything else stays baseline x86-64, and
+# gemm.cpp only calls them after CPUID says they're safe.
+if(MSVC)
+  set_source_files_properties(src/kernels/gemm_avx2.cpp PROPERTIES COMPILE_OPTIONS "/arch:AVX2")
+  set_source_files_properties(src/kernels/gemm_avx512.cpp PROPERTIES COMPILE_OPTIONS "/arch:AVX512")
+else()
+  set_source_files_properties(src/kernels/gemm_avx2.cpp PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma")
+  set_source_files_properties(src/kernels/gemm_avx512.cpp PROPERTIES COMPILE_OPTIONS "-mavx512f;-mfma")
+endif()
+if(MINGW)
+  # the Windows x64 ABI only guarantees a 16-byte aligned stack, and GCC can't realign it for
+  # 32/64-byte vector spills there; have the assembler emit unaligned moves instead
+  target_compile_options(tinyinfer PRIVATE -Wa,-muse-unaligned-vector-move)
 endif()
 
 add_executable(tinyinfer_cli tools/tinyinfer_cli.cpp)

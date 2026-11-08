@@ -2,9 +2,11 @@
 
 #include <cmath>
 #include <random>
+#include <string>
 #include <tuple>
 #include <vector>
 
+#include "tinyinfer/cpu_features.hpp"
 #include "tinyinfer/kernels.hpp"
 
 using namespace tinyinfer;
@@ -37,6 +39,9 @@ class GemmSizes : public ::testing::TestWithParam<std::tuple<int, int, int>> {};
 
 TEST_P(GemmSizes, BlockedMatchesNaive) {
     const auto [m, n, k] = GetParam();
+    const std::string original = gemm_isa();
+    for (const char* isa : {"scalar", "avx2", "avx512"}) {
+    if (!set_gemm_isa(isa)) continue;  // CPU doesn't have it
     for (bool trans_b : {false, true}) {
         const Tensor a = random_tensor(Shape{m, k}, 1);
         const Tensor b = trans_b ? random_tensor(Shape{n, k}, 2) : random_tensor(Shape{k, n}, 2);
@@ -47,6 +52,21 @@ TEST_P(GemmSizes, BlockedMatchesNaive) {
         // float accumulation vs the double reference: error grows like sqrt(k) * eps
         expect_close(got, want, 1e-5F * static_cast<float>(std::sqrt(k) + 1) * 4);
     }
+    }
+    set_gemm_isa(original.c_str());
+}
+
+TEST(Gemm, IsaSelection) {
+    const std::string original = gemm_isa();
+    EXPECT_TRUE(set_gemm_isa("scalar"));
+    EXPECT_STREQ(gemm_isa(), "scalar");
+    EXPECT_FALSE(set_gemm_isa("neon"));
+    EXPECT_STREQ(gemm_isa(), "scalar");  // unchanged after a refusal
+    // whatever CPUID allows must also be selectable
+    const auto& f = cpu_features();
+    EXPECT_EQ(set_gemm_isa("avx2"), f.avx2 && f.fma);
+    EXPECT_EQ(set_gemm_isa("avx512"), f.avx512f && f.fma);
+    set_gemm_isa(original.c_str());
 }
 
 INSTANTIATE_TEST_SUITE_P(Kernels, GemmSizes,
