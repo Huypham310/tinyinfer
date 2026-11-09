@@ -81,14 +81,75 @@ def mixed_types() -> onnx.ModelProto:
     return model
 
 
+def conv_bn_head() -> onnx.ModelProto:
+    """Conv -> BatchNormalization -> Relu -> GlobalAveragePool -> Flatten -> Gemm -> Softmax.
+
+    Everything the executor's BatchNorm folding and Relu fusion passes touch, plus a classifier
+    head, with non-trivial BN statistics so a wrong fold shows up in the outputs.
+    """
+    rng = np.random.default_rng(0)
+    w = rng.normal(0, 0.2, (8, 3, 3, 3)).astype(np.float32)
+    inits = [
+        helper.make_tensor("w", TensorProto.FLOAT, w.shape, w.tobytes(), raw=True),
+        helper.make_tensor("b", TensorProto.FLOAT, [8], rng.normal(0, 0.1, 8).tolist()),
+        helper.make_tensor("scale", TensorProto.FLOAT, [8], rng.uniform(0.5, 1.5, 8).tolist()),
+        helper.make_tensor("shift", TensorProto.FLOAT, [8], rng.normal(0, 0.3, 8).tolist()),
+        helper.make_tensor("mean", TensorProto.FLOAT, [8], rng.normal(0, 0.5, 8).tolist()),
+        helper.make_tensor("var", TensorProto.FLOAT, [8], rng.uniform(0.2, 2.0, 8).tolist()),
+    ]
+    fc = rng.normal(0, 0.3, (5, 8)).astype(np.float32)
+    inits.append(helper.make_tensor("fc", TensorProto.FLOAT, fc.shape, fc.tobytes(), raw=True))
+    inits.append(helper.make_tensor("fcb", TensorProto.FLOAT, [5], [0.1, -0.1, 0.0, 0.2, -0.2]))
+    nodes = [
+        helper.make_node("Conv", ["x", "w", "b"], ["c"], strides=[2, 2], pads=[1, 1, 1, 1]),
+        helper.make_node("BatchNormalization", ["c", "scale", "shift", "mean", "var"], ["bn"],
+                         epsilon=1e-3),  # fmt: skip
+        helper.make_node("Relu", ["bn"], ["r"]),
+        helper.make_node("GlobalAveragePool", ["r"], ["g"]),
+        helper.make_node("Flatten", ["g"], ["f"]),
+        helper.make_node("Gemm", ["f", "fc", "fcb"], ["logits"], transB=1),
+        helper.make_node("Softmax", ["logits"], ["y"], axis=-1),
+    ]
+    graph = helper.make_graph(
+        nodes,
+        "conv_bn_head",
+        [helper.make_tensor_value_info("x", TensorProto.FLOAT, ["N", 3, 16, 16])],
+        [helper.make_tensor_value_info("y", TensorProto.FLOAT, ["N", 5])],
+        initializer=inits,
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])
+    model.ir_version = 8
+    return model
+
+
+def write_reference(path: Path, input_shape: tuple[int, ...], seed: int = 0) -> None:
+    """Runs the model with ONNX Runtime on a seeded random input; saves input and output as
+    raw little-endian float32 next to the model, for the C++ parity tests."""
+    import onnxruntime as ort
+
+    sess = ort.InferenceSession(str(path), providers=["CPUExecutionProvider"])
+    x = np.random.default_rng(seed).standard_normal(input_shape).astype(np.float32)
+    (y,) = sess.run(None, {sess.get_inputs()[0].name: x})
+    stem = path.with_suffix("")
+    x.tofile(f"{stem}.input.bin")
+    y.astype(np.float32).tofile(f"{stem}.output.bin")
+    print(f"  reference {input_shape} -> {y.shape}")
+
+
 def main() -> None:
     OUT.mkdir(parents=True, exist_ok=True)
-    for name, build in [("conv_relu", conv_relu), ("mixed_types", mixed_types)]:
+    fixtures = [
+        ("conv_relu", conv_relu, (2, 3, 8, 8)),
+        ("mixed_types", mixed_types, (2, 6)),
+        ("conv_bn_head", conv_bn_head, (3, 3, 16, 16)),
+    ]
+    for name, build, shape in fixtures:
         model = build()
         onnx.checker.check_model(model)
         path = OUT / f"{name}.onnx"
         onnx.save(model, path)
         print(f"wrote {path} ({path.stat().st_size} bytes)")
+        write_reference(path, shape)
 
 
 if __name__ == "__main__":
