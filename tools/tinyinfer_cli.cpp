@@ -3,7 +3,10 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
+#include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <map>
@@ -15,6 +18,7 @@
 #endif
 
 #include "tinyinfer/cpu_features.hpp"
+#include "tinyinfer/graph.hpp"
 #include "tinyinfer/kernels.hpp"
 #include "tinyinfer/onnx/model.hpp"
 #include "tinyinfer/version.hpp"
@@ -25,6 +29,7 @@ void print_usage() {
     std::cout << "usage: tinyinfer [--info] [--version]\n"
                  "       tinyinfer inspect <model.onnx> [--nodes]\n"
                  "       tinyinfer bench-gemm\n"
+                 "       tinyinfer run <model.onnx> [--batch N] [--iters N] [--ref stem]\n"
                  "  --info     show detected CPU SIMD features\n"
                  "  --version  print version\n"
                  "  inspect    parse an ONNX model and summarize it (--nodes lists every node)\n";
@@ -175,9 +180,84 @@ int bench_gemm() {
     return 0;
 }
 
+/// tinyinfer run <model> [--batch N] [--iters N] [--ref stem]
+int run_model(int argc, char** argv) {
+    namespace ox = tinyinfer::onnx;
+    const char* path = argv[2];
+    int batch = 1, iters = 50;
+    std::string ref;
+    for (int i = 3; i + 1 < argc; i += 2) {
+        if (std::strcmp(argv[i], "--batch") == 0) batch = std::atoi(argv[i + 1]);
+        else if (std::strcmp(argv[i], "--iters") == 0) iters = std::atoi(argv[i + 1]);
+        else if (std::strcmp(argv[i], "--ref") == 0) ref = argv[i + 1];
+    }
+    try {
+        const ox::Model m = ox::load_model(path);
+        const auto feeds_decl = m.graph.runtime_inputs();
+        if (feeds_decl.size() != 1) throw tinyinfer::GraphError("run supports single-input models");
+        const auto* in = feeds_decl[0];
+        std::vector<std::int64_t> dims;
+        for (const auto& d : in->dims) dims.push_back(d.is_static() ? d.value : batch);
+        const tinyinfer::Shape shape(dims);
+        tinyinfer::Graph g(m, {{in->name, shape}});
+        tinyinfer::Tensor x(shape, tinyinfer::DType::Float32);
+        if (!ref.empty()) {
+            std::ifstream f(ref + ".input.bin", std::ios::binary);
+            f.read(reinterpret_cast<char*>(x.data<float>()), static_cast<std::streamsize>(x.nbytes()));
+        } else {
+            for (std::int64_t i = 0; i < x.numel(); ++i) x.data<float>()[i] = static_cast<float>(i % 17) * 0.05F;
+        }
+        tinyinfer::Executor ex(g);
+        std::vector<tinyinfer::Tensor> out;
+        for (int w = 0; w < 5; ++w) out = ex.run({{in->name, x}});  // warm-up
+        std::vector<double> ms;
+        for (int i = 0; i < iters; ++i) {
+            const auto t0 = std::chrono::steady_clock::now();
+            out = ex.run({{in->name, x}});
+            ms.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+        }
+        std::sort(ms.begin(), ms.end());
+        const auto& s = g.stats();
+        std::cout << std::fixed << std::setprecision(2) << g.nodes().size() << " ops after fusion ("
+                  << s.bn_folded << " BN folded, " << s.relu_fused << " ReLU fused), gemm isa "
+                  << tinyinfer::kernels::gemm_isa() << "\n"
+                  << "input " << shape.to_string() << " -> output " << out[0].shape().to_string()
+                  << "\nlatency: median " << ms[ms.size() / 2] << " ms, min " << ms.front()
+                  << " ms over " << iters << " runs\n"
+                  << "activations: " << static_cast<double>(s.activation_bytes) / 1048576.0
+                  << " MiB if all kept, peak " << static_cast<double>(ex.last_peak_bytes()) / 1048576.0
+                  << " MiB with liveness\n";
+        if (std::getenv("TINYINFER_PROFILE") != nullptr) {
+            ex.set_profiling(true);
+            ex.run({{in->name, x}});
+            for (std::size_t i = 0; i < g.nodes().size(); ++i) {
+                const auto& n = g.nodes()[i];
+                std::cout << "  " << std::setw(8) << std::setprecision(3) << ex.node_ms()[i]
+                          << " ms  " << tinyinfer::op_name(n.kind) << " -> "
+                          << g.values()[n.output].shape.to_string() << '\n';
+            }
+        }
+        if (!ref.empty()) {
+            tinyinfer::Tensor want(out[0].shape(), tinyinfer::DType::Float32);
+            std::ifstream f(ref + ".output.bin", std::ios::binary);
+            f.read(reinterpret_cast<char*>(want.data<float>()), static_cast<std::streamsize>(want.nbytes()));
+            float worst = 0.0F;
+            for (std::int64_t i = 0; i < want.numel(); ++i) {
+                worst = std::max(worst, std::abs(want.data<float>()[i] - out[0].data<float>()[i]));
+            }
+            std::cout << std::scientific << std::setprecision(2) << "max |diff| vs reference: " << worst << "\n";
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "error: " << e.what() << '\n';
+        return 1;
+    }
+    return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
+    if (argc >= 3 && std::strcmp(argv[1], "run") == 0) return run_model(argc, argv);
     if (argc >= 2 && std::strcmp(argv[1], "bench-gemm") == 0) return bench_gemm();
     if (argc < 2) {
         print_usage();

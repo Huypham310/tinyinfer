@@ -73,7 +73,9 @@ INSTANTIATE_TEST_SUITE_P(Kernels, GemmSizes,
                          ::testing::Values(std::make_tuple(1, 1, 1), std::make_tuple(3, 5, 7),
                                            std::make_tuple(4, 16, 256), std::make_tuple(5, 17, 257),
                                            std::make_tuple(64, 64, 64), std::make_tuple(65, 513, 300),
-                                           std::make_tuple(130, 40, 600), std::make_tuple(7, 1000, 3)));
+                                           std::make_tuple(130, 40, 600), std::make_tuple(7, 1000, 3),
+                                           // few columns: takes the transposed path
+                                           std::make_tuple(512, 4, 4608), std::make_tuple(96, 3, 70)));
 
 TEST(Gemm, AccumulateAddsToC) {
     const float a[] = {1, 2, 3, 4};  // 2x2

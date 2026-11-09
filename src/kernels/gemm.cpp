@@ -187,8 +187,12 @@ void gemm(int m, int n, int k, const float* a, int lda, const float* b, int ldb,
     float* bshared = bpack.data();
     const std::size_t apack_size = static_cast<std::size_t>(KC) * ((MC + mr - 1) / mr) * mr;
     const int m_blocks = (m + MC - 1) / MC;
-    // threads only pay off once there's enough work per call (thread wake-up is ~µs)
-    const bool parallel = static_cast<double>(m) * n * k > 4e6 && m_blocks > 1;
+    // Threads only pay off with enough work *between barriers*: every (j0, p0) step syncs all
+    // threads twice. A total-work threshold (m*n*k) let conv-sized GEMMs like 512x4x4608 go
+    // parallel and run 3x slower than one thread: 18 k-blocks x 2 barriers x 24 threads.
+    const double work_per_step =
+        static_cast<double>(m) * std::min(n, NC) * std::min(k, KC);
+    const bool parallel = work_per_step >= 8e6 && m_blocks > 1;
     (void)parallel;
 
 #pragma omp parallel if (parallel)

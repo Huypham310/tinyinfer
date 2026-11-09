@@ -127,6 +127,29 @@ OpenMP scaling, n = 2048 (avx512):
 - **The AVX2 kernel first ran at half speed.** Written with `__m256 acc[6][2]`, GCC kept the accumulator array in memory (the edge-tile path stores it) and wrote all 12 registers back to the stack on every k step, so the loop was bound by the store port: 66 GFLOP/s with the data in L1. Twelve named accumulator variables fixed it: 155 GFLOP/s in L1. Found by reading the generated assembly.
 - **Threads**: B is packed once per block by all threads together, then each thread packs and multiplies its own row blocks (`schedule(dynamic)`). Scaling is near-linear on the 4 big Zen 5 cores; past that the chip's other 8 cores are Zen 5c in a separate cluster with its own L3, and 8 threads land partly on SMT siblings sharing FMA units, so 8 threads is *slower* than 4. All 24 threads reach ~540-650 GFLOP/s.
 
+## Running a model
+
+`Graph` turns an `onnx::Model` plus concrete input shapes into an executable graph; `Executor` runs it.
+
+- **Op mapping** for Conv, Relu, Add, MaxPool, GlobalAveragePool / ReduceMean (spatial axes, `axes` as an attribute or, from opset 18, a constant input), Flatten / Reshape (views, no copy), Gemm, BatchNormalization, Softmax, Clip, Identity / Dropout. Anything else is a `GraphError` at load time naming the op, not a crash mid-inference.
+- **Topological sort** (Kahn), so node order in the file doesn't matter; **shape inference** for every value, with symbolic dims like `batch` bound at construction.
+- **BatchNorm folding**: Conv followed by BatchNormalization becomes one Conv with weights scaled by gamma / sqrt(var + eps) and a shifted bias (on copies; initializers are never edited in place).
+- **Relu fusion** into a preceding Conv / Add / Gemm when nothing else reads the pre-activation value: one less pass over memory and one less buffer.
+- **Liveness**: each intermediate is released right after its last reader, so peak memory is the widest point of the network instead of the sum of all activations.
+
+```text
+$ tinyinfer run terrasense/artifacts/model.onnx --ref build/ref/resnet18
+32 ops after fusion (0 BN folded, 17 ReLU fused), gemm isa avx512
+input [1, 3, 64, 64] -> output [1, 10]
+latency: median 13.66 ms, min 11.90 ms over 50 runs
+activations: 1.07 MiB if all kept, peak 0.31 MiB with liveness
+max |diff| vs reference: 2.38e-07
+```
+
+The reference is ONNX Runtime's output for the same input (`tools/ort_reference.py`); the C++ parity tests cover the three small fixtures (Conv + Relu, Reshape / Gemm / Clip, Conv + BN + Relu + pooling + Gemm + Softmax) and the full ResNet-18 when `TINYINFER_RESNET18` / `TINYINFER_RESNET18_REF` are set.
+
+**Correct, not fast yet.** ONNX Runtime runs this model in ~1.8 ms; TinyInfer takes ~13.7 ms. `TINYINFER_PROFILE=1` prints per-op times, and the late convolutions dominate: 512 -> 512 channels on a 2 x 2 feature map is a GEMM with M = 512, N = 4, K = 4608, which wastes most of a 12 x 32 tile and re-packs 9.4 MB of weights on every call (~10 GFLOP/s). Profiling also caught a real bug: the GEMM went multithreaded on total work, and these shapes ran **3x slower with 24 threads than with one** (two barriers per k-block, 18 k-blocks). Gating threads on the work between barriers took the model from 34.6 to 13.7 ms. Pre-packing weights once at load time and a small-N kernel are the next steps (bench phase).
+
 ## Build
 
 Requirements: CMake 3.24+, Ninja, and GCC 12+ or Clang 16+ (MSVC should work but is not the

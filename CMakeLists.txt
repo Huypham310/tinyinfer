@@ -28,6 +28,8 @@ configure_file(include/tinyinfer/version.hpp.in
 
 add_library(tinyinfer
   src/cpu_features.cpp
+  src/executor.cpp
+  src/graph.cpp
   src/kernels/conv.cpp
   src/kernels/gemm.cpp
   src/kernels/gemm_avx2.cpp
