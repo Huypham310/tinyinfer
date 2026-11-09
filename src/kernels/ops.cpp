@@ -91,6 +91,19 @@ Tensor relu(const Tensor& x) {
     return y;
 }
 
+void relu_inplace(Tensor& x) {
+    float* d = x.data<float>();
+    for (std::int64_t i = 0; i < x.numel(); ++i) d[i] = d[i] > 0.0F ? d[i] : 0.0F;
+}
+
+Tensor clip(const Tensor& x, float lo, float hi) {
+    Tensor y(x.shape(), DType::Float32);
+    const float* xd = x.data<float>();
+    float* yd = y.data<float>();
+    for (std::int64_t i = 0; i < x.numel(); ++i) yd[i] = std::min(std::max(xd[i], lo), hi);
+    return y;
+}
+
 Tensor add(const Tensor& a, const Tensor& b) {
     if (a.shape() != b.shape()) {
         throw std::invalid_argument("add: shapes " + a.shape().to_string() + " and " +

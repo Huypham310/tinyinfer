@@ -72,6 +72,9 @@ Tensor batch_norm(const Tensor& x, const Tensor& scale, const Tensor& bias, cons
                   const Tensor& var, float eps);
 
 Tensor relu(const Tensor& x);
+/// In place, for a Relu fused into the op that produced `x` (one less pass and buffer).
+void relu_inplace(Tensor& x);
+Tensor clip(const Tensor& x, float lo, float hi);
 /// Elementwise a + b for equal shapes (residual connections).
 Tensor add(const Tensor& a, const Tensor& b);
 /// Softmax over the last axis, max-subtracted so large logits don't overflow.
