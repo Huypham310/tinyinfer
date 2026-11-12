@@ -3,6 +3,7 @@
 
 #include "tinyinfer/graph.hpp"
 #include "tinyinfer/kernels.hpp"
+#include "tinyinfer/quant.hpp"
 
 namespace tinyinfer {
 
@@ -43,7 +44,19 @@ std::vector<Tensor> Executor::run(const std::map<std::string, Tensor>& feeds) {
         Tensor out;
         switch (n.kind) {
             case OpKind::Conv:
-                out = kernels::conv2d(in(0), in(1), opt(2), n.conv);
+                if (ranges_ != nullptr) {
+                    const Tensor& x = in(0);
+                    const float* d = x.data<float>();
+                    auto [lo, hi] = std::minmax_element(d, d + x.numel());
+                    auto& r = (*ranges_)[i];
+                    r.first = std::min(r.first, *lo);
+                    r.second = std::max(r.second, *hi);
+                }
+                if (plan_ != nullptr && (*plan_)[i].has_value()) {
+                    out = quant::conv2d_int8(in(0), *(*plan_)[i]);
+                } else {
+                    out = kernels::conv2d(in(0), in(1), opt(2), n.conv);
+                }
                 break;
             case OpKind::Relu:
                 out = kernels::relu(in(0));
