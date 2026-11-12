@@ -37,6 +37,8 @@ add_library(tinyinfer
   src/kernels/ops.cpp
   src/layout.cpp
   src/onnx/model.cpp
+  src/quant/gemm_vnni.cpp
+  src/quant/quant.cpp
   src/onnx/wire.cpp
   src/shape.cpp
   src/tensor.cpp
@@ -62,9 +64,11 @@ endif()
 if(MSVC)
   set_source_files_properties(src/kernels/gemm_avx2.cpp PROPERTIES COMPILE_OPTIONS "/arch:AVX2")
   set_source_files_properties(src/kernels/gemm_avx512.cpp PROPERTIES COMPILE_OPTIONS "/arch:AVX512")
+  set_source_files_properties(src/quant/gemm_vnni.cpp PROPERTIES COMPILE_OPTIONS "/arch:AVX512")
 else()
   set_source_files_properties(src/kernels/gemm_avx2.cpp PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma")
   set_source_files_properties(src/kernels/gemm_avx512.cpp PROPERTIES COMPILE_OPTIONS "-mavx512f;-mfma")
+  set_source_files_properties(src/quant/gemm_vnni.cpp PROPERTIES COMPILE_OPTIONS "-mavx512f;-mavx512bw;-mavx512vnni")
 endif()
 if(MINGW)
   # the Windows x64 ABI only guarantees a 16-byte aligned stack, and GCC can't realign it for
