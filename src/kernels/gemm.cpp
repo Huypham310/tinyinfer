@@ -50,7 +50,18 @@ void scalar_4x16(int kc, const float* ap, const float* bp, float* c, int ldc, in
 
 }  // namespace
 
-KernelInfo scalar_kernel() { return {"scalar", SMR, SNR, scalar_4x16}; }
+void skinny_scalar(int m, int n, int k, const float* a, int lda, const float* bt, int ldbt,
+                   float* c, int ldc) {
+    for (int i = 0; i < m; ++i) {
+        for (int j = 0; j < n; ++j) {
+            float s = 0.0F;
+            for (int p = 0; p < k; ++p) s += a[i * lda + p] * bt[j * ldbt + p];
+            c[i * ldc + j] += s;
+        }
+    }
+}
+
+KernelInfo scalar_kernel() { return {"scalar", SMR, SNR, scalar_4x16, skinny_scalar}; }
 
 }  // namespace detail
 
@@ -65,6 +76,8 @@ using detail::KernelInfo;
 constexpr int MC = 96;
 constexpr int KC = 256;
 constexpr int NC = 512;
+// at or below this many columns gemm() skips packing and uses the skinny dot-product kernel
+constexpr int kSkinnyMaxN = 16;
 
 /// Copies a kc x nc block of op(B) into nr-wide column panels: panel j holds rows 0..kc-1 of
 /// columns [j*nr, j*nr + nr), zero-padded past nc, so the micro-kernel reads B sequentially.
@@ -180,6 +193,33 @@ void gemm(int m, int n, int k, const float* a, int lda, const float* b, int ldb,
     if (m == 0 || n == 0 || k == 0) return;
     const KernelInfo& ker = *active().load(std::memory_order_acquire);
     const int mr = ker.mr, nr = ker.nr;
+
+    if (n <= kSkinnyMaxN) {
+        // late ResNet convs at batch 1 (2 x 2 maps -> n = 4): the packed path wastes most of a
+        // 32-wide tile and re-packs MBs of weights per call; dot products straight off A win
+        const float* bt = b;
+        int ldbt = ldb;
+        thread_local std::vector<float> btbuf;
+        if (!trans_b) {
+            btbuf.resize(static_cast<std::size_t>(n) * k);
+            for (int p = 0; p < k; ++p)
+                for (int j = 0; j < n; ++j) btbuf[static_cast<std::size_t>(j) * k + p] = b[p * ldb + j];
+            bt = btbuf.data();
+            ldbt = k;
+        }
+        constexpr int rows_per_task = 16;
+        const int tasks = (m + rows_per_task - 1) / rows_per_task;
+        // one barrier at the end only, so the bar for going parallel is much lower here
+        const bool par = static_cast<double>(m) * n * k >= 1e6 && tasks > 1;
+        (void)par;
+#pragma omp parallel for schedule(dynamic, 1) if (par)
+        for (int t = 0; t < tasks; ++t) {
+            const int i0 = t * rows_per_task;
+            ker.skinny(std::min(rows_per_task, m - i0), n, k, a + i0 * lda, lda, bt, ldbt,
+                       c + i0 * ldc, ldc);
+        }
+        return;
+    }
 
     // packing buffers are reused across calls on this thread: no allocation in steady state
     thread_local std::vector<float> bpack;
