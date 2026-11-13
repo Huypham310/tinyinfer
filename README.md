@@ -150,6 +150,27 @@ The reference is ONNX Runtime's output for the same input (`tools/ort_reference.
 
 **Correct, not fast yet.** ONNX Runtime runs this model in ~1.8 ms; TinyInfer takes ~13.7 ms. `TINYINFER_PROFILE=1` prints per-op times, and the late convolutions dominate: 512 -> 512 channels on a 2 x 2 feature map is a GEMM with M = 512, N = 4, K = 4608, which wastes most of a 12 x 32 tile and re-packs 9.4 MB of weights on every call (~10 GFLOP/s). Profiling also caught a real bug: the GEMM went multithreaded on total work, and these shapes ran **3x slower with 24 threads than with one** (two barriers per k-block, 18 k-blocks). Gating threads on the work between barriers took the model from 34.6 to 13.7 ms. Pre-packing weights once at load time and a small-N kernel are the next steps (bench phase).
 
+## INT8 quantization
+
+Post-training quantization of the convolutions (`tinyinfer::quant`), the scheme ONNX Runtime and oneDNN use on x86:
+
+- **Weights**: symmetric int8 with one scale per output channel, packed once at load time into 8-row panels with k in groups of 4.
+- **Activations**: asymmetric uint8 with a zero point, one scale per tensor from the min / max observed on calibration images. The range always includes 0, so zero padding is exact; im2col pads with the zero point, not with 0.
+- **Kernel**: AVX-512 VNNI. `vpdpbusd` multiplies 4 uint8 activations by 4 int8 weights and adds them into an int32 lane, 64 MACs per instruction; an 8 x 32 tile keeps 16 accumulators in registers. A scalar kernel over the same packed layout is the fallback, and a test checks the two agree **bit for bit**.
+- **Dequantization**: `y = (acc - zp * sum(w)) * s_x * s_w[o] + bias`; everything between convolutions (Add, pooling, the classifier) stays float.
+
+`tools/export_eval_set.py` exports TerraSense's preprocessed EuroSAT test split (2,700 images) and 256 validation images for calibration:
+
+```text
+$ tinyinfer eval terrasense/artifacts/model.onnx --data build/eval --batch 100
+2700 test images, batch 100, int8 kernel vnni, calibration 256 images in 2.31 s
+  fp32: accuracy 98.19%, 10.89 ms/image
+  int8: accuracy 98.07%, 4.38 ms/image (2.49x), same top-1 as fp32 on 99.81%
+```
+
+- The fp32 accuracy is exactly the 98.19% TerraSense reports with ONNX Runtime on the same split: the whole engine, end to end, on 2,700 real images.
+- INT8 costs 0.12 points (ONNX Runtime's static INT8 on this model: 98.11%) and runs 2.5x faster than TinyInfer's own fp32. Absolute speed is still behind ONNX Runtime: convolutions run one image at a time, so the late 2 x 2 layers are GEMMs with N = 4 whatever the batch size, which batching the im2col across images would fix.
+
 ## Build
 
 Requirements: CMake 3.24+, Ninja, and GCC 12+ or Clang 16+ (MSVC should work but is not the
