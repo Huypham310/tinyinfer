@@ -188,40 +188,61 @@ Tensor conv2d_int8(const Tensor& x, const QConv& q) {
     const auto pad = static_cast<std::uint8_t>(q.input.zero_point);  // the uint8 that means 0.0
 
     Tensor y(Shape{n, q.oc, oh, ow}, DType::Float32);
-    thread_local std::vector<std::uint8_t> xq, cols;
+    // several images per GEMM, same reason as the fp32 conv: at 2 x 2 maps one image is only
+    // 4 columns of a 32-wide tile. ~2 MB of uint8 columns per chunk.
+    constexpr std::size_t kColsBudget = std::size_t{2} << 20;
+    const std::size_t per_image = static_cast<std::size_t>(q.k) * pixels;
+    const int chunk = std::max(1, std::min(n, static_cast<int>(kColsBudget / per_image)));
+    thread_local std::vector<std::uint8_t> cols;
     thread_local std::vector<std::int32_t> acc;
-    xq.resize(static_cast<std::size_t>(c) * h * w);
-    cols.resize(static_cast<std::size_t>(q.k) * pixels);
-    acc.resize(static_cast<std::size_t>(q.oc) * pixels);
+    cols.resize(per_image * chunk);
+    acc.resize(static_cast<std::size_t>(q.oc) * pixels * chunk);
 
-    for (int img = 0; img < n; ++img) {
-        const float* xs = x.data<float>() + static_cast<std::size_t>(img) * c * h * w;
-        for (std::size_t i = 0; i < xq.size(); ++i) xq[i] = quantize_u8(xs[i], q.input);
-        // im2col on uint8; out-of-image taps get the zero point, not 0
-        for (int ci = 0; ci < c; ++ci)
-            for (int ky = 0; ky < q.kh; ++ky)
-                for (int kx = 0; kx < q.kw; ++kx) {
-                    std::uint8_t* row = cols.data() +
-                                        (static_cast<std::size_t>(ci) * q.kh * q.kw + ky * q.kw + kx) * pixels;
-                    for (int oy = 0; oy < oh; ++oy) {
-                        const int iy = oy * p.stride[0] - p.pads[0] + ky * p.dilation[0];
-                        for (int ox = 0; ox < ow; ++ox) {
-                            const int ix = ox * p.stride[1] - p.pads[1] + kx * p.dilation[1];
-                            row[oy * ow + ox] = (iy >= 0 && iy < h && ix >= 0 && ix < w)
-                                                    ? xq[(static_cast<std::size_t>(ci) * h + iy) * w + ix]
-                                                    : pad;
+    for (int n0 = 0; n0 < n; n0 += chunk) {
+        const int cnt = std::min(chunk, n - n0);
+        const int ld = cnt * pixels;
+        std::uint8_t* cbase = cols.data();
+#pragma omp parallel for schedule(static) if (cnt > 1 && per_image * cnt >= (std::size_t{1} << 20))
+        for (int i = 0; i < cnt; ++i) {
+            thread_local std::vector<std::uint8_t> xq;
+            xq.resize(static_cast<std::size_t>(c) * h * w);
+            const float* xs = x.data<float>() + static_cast<std::size_t>(n0 + i) * c * h * w;
+            for (std::size_t t = 0; t < xq.size(); ++t) xq[t] = quantize_u8(xs[t], q.input);
+            // im2col on uint8 into this image's column block; out-of-image taps get the zero
+            // point, not 0
+            for (int ci = 0; ci < c; ++ci)
+                for (int ky = 0; ky < q.kh; ++ky)
+                    for (int kx = 0; kx < q.kw; ++kx) {
+                        std::uint8_t* row =
+                            cbase +
+                            (static_cast<std::size_t>(ci) * q.kh * q.kw + ky * q.kw + kx) * ld +
+                            static_cast<std::size_t>(i) * pixels;
+                        for (int oy = 0; oy < oh; ++oy) {
+                            const int iy = oy * p.stride[0] - p.pads[0] + ky * p.dilation[0];
+                            for (int ox = 0; ox < ow; ++ox) {
+                                const int ix = ox * p.stride[1] - p.pads[1] + kx * p.dilation[1];
+                                row[oy * ow + ox] =
+                                    (iy >= 0 && iy < h && ix >= 0 && ix < w)
+                                        ? xq[(static_cast<std::size_t>(ci) * h + iy) * w + ix]
+                                        : pad;
+                            }
                         }
                     }
-                }
-        gemm_packed(q, cols.data(), pixels, acc.data());
-        // dequantize: sum((xq - zp) * wq) = acc - zp * sum(wq), times s_x * s_w[o]
-        float* ys = y.data<float>() + static_cast<std::size_t>(img) * q.oc * pixels;
+        }
+        gemm_packed(q, cols.data(), ld, acc.data());
+        // dequantize: sum((xq - zp) * wq) = acc - zp * sum(wq), times s_x * s_w[o];
+        // acc is [oc, image, pixel], the output NCHW
         for (int o = 0; o < q.oc; ++o) {
             const float s = q.input.scale * q.w_scale[o];
             const std::int32_t corr = q.input.zero_point * q.w_sum[o];
             const float b = q.bias.empty() ? 0.0F : q.bias[o];
-            const std::int32_t* a = acc.data() + static_cast<std::size_t>(o) * pixels;
-            for (int j = 0; j < pixels; ++j) ys[o * pixels + j] = static_cast<float>(a[j] - corr) * s + b;
+            for (int i = 0; i < cnt; ++i) {
+                const std::int32_t* a =
+                    acc.data() + static_cast<std::size_t>(o) * ld + static_cast<std::size_t>(i) * pixels;
+                float* ys = y.data<float>() +
+                            (static_cast<std::size_t>(n0 + i) * q.oc + o) * pixels;
+                for (int j = 0; j < pixels; ++j) ys[j] = static_cast<float>(a[j] - corr) * s + b;
+            }
         }
     }
     return y;

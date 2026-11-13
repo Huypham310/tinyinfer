@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cmath>
 #include <random>
 #include <string>
@@ -76,6 +77,26 @@ INSTANTIATE_TEST_SUITE_P(
                       // odd sizes: k not a multiple of 4, oc not a multiple of 8, n not of 32
                       std::make_tuple("vnni", 5, 13, 7, 3), std::make_tuple("vnni", 64, 64, 8, 3),
                       std::make_tuple("vnni", 16, 40, 6, 1)));
+
+TEST(Int8Conv, BatchedMatchesOneImageAtATime) {
+    // 32 ch x 3x3 on 56x56 is ~0.9 MB of columns per image: 2 images per chunk, then a tail of 1
+    const Tensor x = random_tensor(Shape{3, 32, 56, 56}, 21, -1.0F, 2.0F);
+    const Tensor w = random_tensor(Shape{8, 32, 3, 3}, 22, -0.5F, 0.5F);
+    kernels::Conv2dParams p;
+    p.pads = {1, 1, 1, 1};
+    const QConv q = quantize_conv(w, nullptr, p, choose_u8(-1.0F, 2.0F));
+    const Tensor all = conv2d_int8(x, q);
+    const std::int64_t per = all.numel() / 3;
+    for (int i = 0; i < 3; ++i) {
+        Tensor one(Shape{1, 32, 56, 56}, DType::Float32);
+        std::copy_n(x.data<float>() + i * one.numel(), one.numel(), one.data<float>());
+        const Tensor y = conv2d_int8(one, q);
+        // integer accumulation + the same float ops: identical, not just close
+        for (std::int64_t j = 0; j < per; ++j) {
+            ASSERT_EQ(y.data<float>()[j], all.data<float>()[i * per + j]) << "image " << i;
+        }
+    }
+}
 
 TEST(Quant, VnniKernelIsBitExactAgainstTheReference) {
     if (!set_int8_isa("vnni")) GTEST_SKIP() << "no AVX-512 VNNI";
