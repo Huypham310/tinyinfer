@@ -74,8 +74,33 @@ INSTANTIATE_TEST_SUITE_P(Kernels, GemmSizes,
                                            std::make_tuple(4, 16, 256), std::make_tuple(5, 17, 257),
                                            std::make_tuple(64, 64, 64), std::make_tuple(65, 513, 300),
                                            std::make_tuple(130, 40, 600), std::make_tuple(7, 1000, 3),
-                                           // few columns: takes the transposed path
-                                           std::make_tuple(512, 4, 4608), std::make_tuple(96, 3, 70)));
+                                           // n <= 16 goes through the skinny kernel: column
+                                           // groups, row tails and k tails, plus 17 (packed again)
+                                           std::make_tuple(512, 4, 4608), std::make_tuple(96, 3, 70),
+                                           std::make_tuple(6, 16, 33), std::make_tuple(9, 15, 17),
+                                           std::make_tuple(33, 17, 31), std::make_tuple(258, 7, 1)));
+
+TEST(Gemm, SkinnyRespectsLeadingDims) {
+    // A and C as sub-blocks of wider matrices: the skinny kernel must step by lda / ldc, not k / n
+    constexpr int m = 13, n = 5, k = 37, lda = 50, ldb = 9, ldc = 11;
+    const Tensor a = random_tensor(Shape{m, lda}, 3);
+    const Tensor b = random_tensor(Shape{k, ldb}, 4);
+    const std::string original = gemm_isa();
+    for (const char* isa : {"scalar", "avx2", "avx512"}) {
+        if (!set_gemm_isa(isa)) continue;
+        std::vector<float> want(m * ldc, 7.0F), got(m * ldc, 7.0F);
+        gemm_naive(m, n, k, a.data<float>(), lda, b.data<float>(), ldb, false, want.data(), ldc);
+        gemm(m, n, k, a.data<float>(), lda, b.data<float>(), ldb, false, got.data(), ldc);
+        for (int i = 0; i < m; ++i) {
+            for (int j = 0; j < ldc; ++j) {
+                // columns past n belong to someone else and must stay untouched
+                if (j >= n) EXPECT_EQ(got[i * ldc + j], 7.0F) << isa;
+                else EXPECT_NEAR(got[i * ldc + j], want[i * ldc + j], 1e-4F) << isa;
+            }
+        }
+    }
+    set_gemm_isa(original.c_str());
+}
 
 TEST(Gemm, AccumulateAddsToC) {
     const float a[] = {1, 2, 3, 4};  // 2x2
