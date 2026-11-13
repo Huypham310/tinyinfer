@@ -15,6 +15,7 @@ add_executable(tinyinfer_tests
   test_graph.cpp
   test_kernels.cpp
   test_onnx.cpp
+  test_quant.cpp
   test_tensor.cpp
   test_wire.cpp
 )

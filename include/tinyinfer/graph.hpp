@@ -3,7 +3,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <optional>
 #include <stdexcept>
+#include <utility>
 #include <string>
 #include <vector>
 
@@ -12,6 +14,10 @@
 #include "tinyinfer/tensor.hpp"
 
 namespace tinyinfer {
+
+namespace quant {
+struct QConv;
+}
 
 /// Operators the executor can run. Anything else in a model is a GraphError at load time,
 /// not a surprise halfway through inference.
@@ -117,11 +123,20 @@ public:
     void set_profiling(bool on) noexcept { profile_ = on; }
     [[nodiscard]] const std::vector<double>& node_ms() const noexcept { return node_ms_; }
 
+    /// Calibration: widen ranges[i] to the min / max of node i's first input, for every Conv.
+    void observe_conv_inputs(std::vector<std::pair<float, float>>* ranges) noexcept {
+        ranges_ = ranges;
+    }
+    /// Run the Conv nodes that have an entry in `plan` with int8 kernels (see quant.hpp).
+    void set_int8(const std::vector<std::optional<quant::QConv>>* plan) noexcept { plan_ = plan; }
+
 private:
     const Graph& g_;
     std::size_t peak_ = 0;
     bool profile_ = false;
     std::vector<double> node_ms_;
+    std::vector<std::pair<float, float>>* ranges_ = nullptr;
+    const std::vector<std::optional<quant::QConv>>* plan_ = nullptr;
 };
 
 }  // namespace tinyinfer

@@ -10,6 +10,7 @@
 #include <iomanip>
 #include <iostream>
 #include <map>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -21,6 +22,7 @@
 #include "tinyinfer/graph.hpp"
 #include "tinyinfer/kernels.hpp"
 #include "tinyinfer/onnx/model.hpp"
+#include "tinyinfer/quant.hpp"
 #include "tinyinfer/version.hpp"
 
 namespace {
@@ -30,6 +32,7 @@ void print_usage() {
                  "       tinyinfer inspect <model.onnx> [--nodes]\n"
                  "       tinyinfer bench-gemm\n"
                  "       tinyinfer run <model.onnx> [--batch N] [--iters N] [--ref stem]\n"
+                 "       tinyinfer eval <model.onnx> --data <dir> [--batch N]\n"
                  "  --info     show detected CPU SIMD features\n"
                  "  --version  print version\n"
                  "  inspect    parse an ONNX model and summarize it (--nodes lists every node)\n";
@@ -254,9 +257,99 @@ int run_model(int argc, char** argv) {
     return 0;
 }
 
+std::vector<float> read_all(const std::string& path) {
+    std::ifstream f(path, std::ios::binary | std::ios::ate);
+    if (!f) throw std::runtime_error("cannot open " + path);
+    const auto bytes = static_cast<std::size_t>(f.tellg());
+    std::vector<float> v(bytes / sizeof(float));
+    f.seekg(0);
+    f.read(reinterpret_cast<char*>(v.data()), static_cast<std::streamsize>(bytes));
+    return v;
+}
+
+/// tinyinfer eval <model> --data <dir> [--batch N]: accuracy and latency, fp32 vs int8, on the
+/// arrays written by tools/export_eval_set.py.
+int eval_model(int argc, char** argv) {
+    namespace ox = tinyinfer::onnx;
+    using tinyinfer::Shape;
+    using tinyinfer::Tensor;
+    std::string dir = "build/eval";
+    int batch = 100;
+    for (int i = 3; i + 1 < argc; i += 2) {
+        if (std::strcmp(argv[i], "--data") == 0) dir = argv[i + 1];
+        else if (std::strcmp(argv[i], "--batch") == 0) batch = std::atoi(argv[i + 1]);
+    }
+    try {
+        const ox::Model m = ox::load_model(argv[2]);
+        const auto* in = m.graph.runtime_inputs().at(0);
+        const std::vector<float> images = read_all(dir + "/test.images.bin");
+        const std::vector<float> calib = read_all(dir + "/calib.images.bin");
+        std::ifstream lf(dir + "/test.labels.bin", std::ios::binary | std::ios::ate);
+        std::vector<std::int64_t> labels(static_cast<std::size_t>(lf.tellg()) / 8);
+        lf.seekg(0);
+        lf.read(reinterpret_cast<char*>(labels.data()), static_cast<std::streamsize>(labels.size() * 8));
+        const std::int64_t per = 3 * 64 * 64;
+        const auto n = static_cast<std::int64_t>(labels.size());
+
+        auto slice = [&](const std::vector<float>& src, std::int64_t from, std::int64_t count) {
+            Tensor t(Shape{count, 3, 64, 64}, tinyinfer::DType::Float32);
+            std::copy(src.begin() + from * per, src.begin() + (from + count) * per, t.data<float>());
+            return t;
+        };
+        tinyinfer::Graph g(m, {{in->name, Shape{batch, 3, 64, 64}}});
+        std::vector<Tensor> calib_batches;
+        const auto nc = static_cast<std::int64_t>(calib.size()) / per;
+        for (std::int64_t s = 0; s + batch <= nc; s += batch) calib_batches.push_back(slice(calib, s, batch));
+        if (calib_batches.empty()) calib_batches.push_back(slice(calib, 0, batch));  // batch > nc
+        const auto t0 = std::chrono::steady_clock::now();
+        const tinyinfer::quant::QuantPlan plan = tinyinfer::quant::calibrate(g, in->name, calib_batches);
+        const double calib_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+
+        tinyinfer::Executor fp(g), q8(g);
+        q8.set_int8(&plan);
+        std::int64_t correct_fp = 0, correct_q8 = 0, agree = 0, seen = 0;
+        double ms_fp = 0, ms_q8 = 0;
+        for (std::int64_t s = 0; s + batch <= n; s += batch) {
+            const Tensor x = slice(images, s, batch);
+            auto t1 = std::chrono::steady_clock::now();
+            const Tensor a = fp.run({{in->name, x}})[0];
+            auto t2 = std::chrono::steady_clock::now();
+            const Tensor b = q8.run({{in->name, x}})[0];
+            auto t3 = std::chrono::steady_clock::now();
+            ms_fp += std::chrono::duration<double, std::milli>(t2 - t1).count();
+            ms_q8 += std::chrono::duration<double, std::milli>(t3 - t2).count();
+            const auto classes = a.shape()[1];
+            for (std::int64_t i = 0; i < batch; ++i) {
+                const float* pa = a.data<float>() + i * classes;
+                const float* pb = b.data<float>() + i * classes;
+                const auto ca = std::max_element(pa, pa + classes) - pa;
+                const auto cb = std::max_element(pb, pb + classes) - pb;
+                correct_fp += ca == labels[static_cast<std::size_t>(s + i)];
+                correct_q8 += cb == labels[static_cast<std::size_t>(s + i)];
+                agree += ca == cb;
+            }
+            seen += batch;
+        }
+        std::cout << std::fixed << std::setprecision(2) << seen << " test images, batch " << batch
+                  << ", int8 kernel " << tinyinfer::quant::int8_isa() << ", calibration "
+                  << nc << " images in " << calib_s << " s\n"
+                  << "  fp32: accuracy " << 100.0 * static_cast<double>(correct_fp) / static_cast<double>(seen)
+                  << "%, " << ms_fp / static_cast<double>(seen) << " ms/image\n"
+                  << "  int8: accuracy " << 100.0 * static_cast<double>(correct_q8) / static_cast<double>(seen)
+                  << "%, " << ms_q8 / static_cast<double>(seen) << " ms/image ("
+                  << ms_fp / ms_q8 << "x), same top-1 as fp32 on "
+                  << 100.0 * static_cast<double>(agree) / static_cast<double>(seen) << "%\n";
+    } catch (const std::exception& e) {
+        std::cerr << "error: " << e.what() << '\n';
+        return 1;
+    }
+    return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
+    if (argc >= 3 && std::strcmp(argv[1], "eval") == 0) return eval_model(argc, argv);
     if (argc >= 3 && std::strcmp(argv[1], "run") == 0) return run_model(argc, argv);
     if (argc >= 2 && std::strcmp(argv[1], "bench-gemm") == 0) return bench_gemm();
     if (argc < 2) {
