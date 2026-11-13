@@ -74,11 +74,12 @@ INSTANTIATE_TEST_SUITE_P(Kernels, GemmSizes,
                                            std::make_tuple(4, 16, 256), std::make_tuple(5, 17, 257),
                                            std::make_tuple(64, 64, 64), std::make_tuple(65, 513, 300),
                                            std::make_tuple(130, 40, 600), std::make_tuple(7, 1000, 3),
-                                           // n <= 16 goes through the skinny kernel: column
-                                           // groups, row tails and k tails, plus 17 (packed again)
+                                           // n <= 32 goes through the skinny kernel: column
+                                           // groups, row tails and k tails, plus 33 (packed again)
                                            std::make_tuple(512, 4, 4608), std::make_tuple(96, 3, 70),
                                            std::make_tuple(6, 16, 33), std::make_tuple(9, 15, 17),
-                                           std::make_tuple(33, 17, 31), std::make_tuple(258, 7, 1)));
+                                           std::make_tuple(33, 17, 31), std::make_tuple(258, 7, 1),
+                                           std::make_tuple(20, 32, 45), std::make_tuple(21, 33, 45)));
 
 TEST(Gemm, SkinnyRespectsLeadingDims) {
     // A and C as sub-blocks of wider matrices: the skinny kernel must step by lda / ldc, not k / n
