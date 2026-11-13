@@ -3,6 +3,7 @@
 #include <string>
 #include <vector>
 
+#include "../parallel.hpp"
 #include "tinyinfer/kernels.hpp"
 
 namespace tinyinfer::kernels {
@@ -13,6 +14,9 @@ int conv_out_size(int in, int kernel, int stride, int pad_begin, int pad_end, in
 }
 
 namespace {
+
+// column-matrix elements per im2col thread (~2 MB of writes)
+constexpr double kIm2colPerThread = 1 << 19;
 
 struct ConvShape {
     int n, c, h, w, oc, kh, kw, oh, ow, cg, ocg;
@@ -130,9 +134,14 @@ Tensor conv2d(const Tensor& x, const Tensor& w, const Tensor* bias, const Conv2d
     for (int n0 = 0; n0 < s.n; n0 += chunk) {
         const int cnt = std::min(chunk, s.n - n0);
         const std::size_t ld = static_cast<std::size_t>(cnt) * pixels;
+        // images write disjoint column blocks, so im2col splits across threads for free. Only a
+        // few though: it's memory-bound, and 24 threads here then 4 in the GEMM left 20 of them
+        // spinning on SMT siblings: batch-32 layer1 ran 3x slower than single-threaded.
+        const int im2col_threads = std::min(
+            cnt, par::team_size(static_cast<double>(ld) * kdim, kIm2colPerThread));
+        (void)im2col_threads;
         for (int g = 0; g < p.groups; ++g) {
-            // images write disjoint column blocks, so im2col splits across threads for free
-#pragma omp parallel for schedule(static) if (ld * kdim >= (std::size_t{1} << 20))
+#pragma omp parallel for schedule(static) num_threads(im2col_threads) if (im2col_threads > 1)
             for (int i = 0; i < cnt; ++i) {
                 const float* xg =
                     xd + (static_cast<std::size_t>(n0 + i) * s.c + g * s.cg) * s.h * s.w;

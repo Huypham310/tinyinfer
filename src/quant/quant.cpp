@@ -7,6 +7,7 @@
 #include <limits>
 #include <stdexcept>
 
+#include "../parallel.hpp"
 #include "quant_kernels.hpp"
 #include "tinyinfer/cpu_features.hpp"
 
@@ -94,9 +95,10 @@ void gemm_packed(const QConv& q, const std::uint8_t* b, int n, std::int32_t* c) 
     const int col_panels = (n + kNR - 1) / kNR;
     const int row_panels = (q.oc + kMR - 1) / kMR;
     const std::size_t panel_bytes = static_cast<std::size_t>(kgroups) * kMR * 4;
-    const bool parallel = col_panels >= 4 && static_cast<double>(q.oc) * n * q.k > 4e6;
-    (void)parallel;
-#pragma omp parallel for schedule(dynamic, 1) if (parallel)
+    // ~4M MACs per thread: VNNI does 4x the MACs per instruction of the fp32 kernel
+    const int team = std::min(col_panels, par::team_size(static_cast<double>(q.oc) * n * q.k, 4e6));
+    (void)team;
+#pragma omp parallel for schedule(dynamic, 1) num_threads(team) if (team > 1)
     for (int jp = 0; jp < col_panels; ++jp) {
         thread_local std::vector<std::uint8_t> bp;
         bp.resize(static_cast<std::size_t>(kgroups) * kNR * 4);
@@ -202,7 +204,11 @@ Tensor conv2d_int8(const Tensor& x, const QConv& q) {
         const int cnt = std::min(chunk, n - n0);
         const int ld = cnt * pixels;
         std::uint8_t* cbase = cols.data();
-#pragma omp parallel for schedule(static) if (cnt > 1 && per_image * cnt >= (std::size_t{1} << 20))
+        // a handful of threads only, same trap as the fp32 im2col (idle spinners steal cores)
+        const int threads =
+            std::min(cnt, par::team_size(static_cast<double>(per_image) * cnt, 1 << 20));
+        (void)threads;
+#pragma omp parallel for schedule(static) num_threads(threads) if (threads > 1)
         for (int i = 0; i < cnt; ++i) {
             thread_local std::vector<std::uint8_t> xq;
             xq.resize(static_cast<std::size_t>(c) * h * w);

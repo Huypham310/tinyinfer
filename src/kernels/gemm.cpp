@@ -9,6 +9,7 @@
 #include <omp.h>
 #endif
 
+#include "../parallel.hpp"
 #include "microkernels.hpp"
 #include "tinyinfer/cpu_features.hpp"
 #include "tinyinfer/kernels.hpp"
@@ -80,8 +81,10 @@ using detail::KernelInfo;
 constexpr int MC = 96;
 constexpr int KC = 256;
 constexpr int NC = 512;
-// at or below this many columns gemm() skips packing and uses the skinny dot-product kernel
-constexpr int kSkinnyMaxN = 16;
+// at or below this many columns gemm() skips packing and uses the skinny dot-product kernel.
+// From BM_GemmFewColumns (512 x n x 4608, 4 threads): skinny 286 / 188 GFLOP/s at n = 16 / 32,
+// packed 62 at n = 32 and 230 at n = 64, so the crossover sits between 32 and 64
+constexpr int kSkinnyMaxN = 32;
 // smallest slice of B (in micro-panels) worth a task of its own
 constexpr int kPanelsPerTask = 2;
 // MACs each thread should get between two barriers (~30 us of micro-kernel time); fewer and
@@ -218,10 +221,10 @@ void gemm(int m, int n, int k, const float* a, int lda, const float* b, int ldb,
         }
         constexpr int rows_per_task = 16;
         const int tasks = (m + rows_per_task - 1) / rows_per_task;
-        // one barrier at the end only, so the bar for going parallel is much lower here
-        const bool par = static_cast<double>(m) * n * k >= 1e6 && tasks > 1;
-        (void)par;
-#pragma omp parallel for schedule(dynamic, 1) if (par)
+        const int team = std::min(tasks, par::team_size(static_cast<double>(m) * n * k,
+                                                           kWorkPerThread));
+        (void)team;
+#pragma omp parallel for schedule(dynamic, 1) num_threads(team) if (team > 1)
         for (int t = 0; t < tasks; ++t) {
             const int i0 = t * rows_per_task;
             ker.skinny(std::min(rows_per_task, m - i0), n, k, a + i0 * lda, lda, bt, ldbt,
@@ -244,14 +247,10 @@ void gemm(int m, int n, int k, const float* a, int lda, const float* b, int ldb,
     const double work_per_step =
         static_cast<double>(m) * std::min(n, NC) * std::min(k, KC);
     int threads = 1;
-#ifdef _OPENMP
     // below ~8M MACs per step even 2 threads lost at batch 1 (5.5 -> 7.7 ms on ResNet-18)
     if (work_per_step >= 4 * kWorkPerThread && (m_blocks > 1 || n >= 2 * kPanelsPerTask * nr)) {
-        threads = static_cast<int>(
-            std::min<double>(omp_get_max_threads(), work_per_step / kWorkPerThread));
-        threads = std::max(threads, 1);
+        threads = par::team_size(work_per_step, kWorkPerThread);
     }
-#endif
     (void)threads;
 
 #pragma omp parallel num_threads(threads) if (threads > 1)
