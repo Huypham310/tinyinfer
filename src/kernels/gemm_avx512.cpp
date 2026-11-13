@@ -48,9 +48,74 @@ void kernel_12x32(int kc, const float* a, const float* b, float* c, int ldc, int
         for (int j = 0; j < w; ++j) c[i * ldc + j] += tmp[i][j];
 }
 
+/// R rows of A against NJ columns of Bt: R * NJ zmm accumulators (16 at most), each one a
+/// 16-wide partial dot product that gets reduced at the end. The template bounds are
+/// compile-time so GCC fully unrolls and keeps every accumulator in a register.
+template <int R, int NJ>
+void skinny_block(int k, const float* a, int lda, const float* bt, int ldbt, float* c, int ldc) {
+    __m512 acc[R][NJ];
+    for (int r = 0; r < R; ++r)
+        for (int j = 0; j < NJ; ++j) acc[r][j] = _mm512_setzero_ps();
+    int p = 0;
+    for (; p + 16 <= k; p += 16) {
+        __m512 av[R];
+        for (int r = 0; r < R; ++r) av[r] = _mm512_loadu_ps(a + r * lda + p);
+        for (int j = 0; j < NJ; ++j) {
+            const __m512 bv = _mm512_loadu_ps(bt + j * ldbt + p);
+            for (int r = 0; r < R; ++r) acc[r][j] = _mm512_fmadd_ps(av[r], bv, acc[r][j]);
+        }
+    }
+    if (p < k) {
+        // k tail: masked loads read nothing past the end of the row
+        const __mmask16 m = static_cast<__mmask16>((1U << (k - p)) - 1U);
+        __m512 av[R];
+        for (int r = 0; r < R; ++r) av[r] = _mm512_maskz_loadu_ps(m, a + r * lda + p);
+        for (int j = 0; j < NJ; ++j) {
+            const __m512 bv = _mm512_maskz_loadu_ps(m, bt + j * ldbt + p);
+            for (int r = 0; r < R; ++r) acc[r][j] = _mm512_fmadd_ps(av[r], bv, acc[r][j]);
+        }
+    }
+    for (int r = 0; r < R; ++r)
+        for (int j = 0; j < NJ; ++j) c[r * ldc + j] += _mm512_reduce_add_ps(acc[r][j]);
+}
+
+template <int R>
+void skinny_rows(int nj, int k, const float* a, int lda, const float* bt, int ldbt, float* c,
+                 int ldc) {
+    switch (nj) {
+        case 1:
+            skinny_block<R, 1>(k, a, lda, bt, ldbt, c, ldc);
+            break;
+        case 2:
+            skinny_block<R, 2>(k, a, lda, bt, ldbt, c, ldc);
+            break;
+        case 3:
+            skinny_block<R, 3>(k, a, lda, bt, ldbt, c, ldc);
+            break;
+        default:
+            skinny_block<R, 4>(k, a, lda, bt, ldbt, c, ldc);
+            break;
+    }
+}
+
+void skinny_avx512(int m, int n, int k, const float* a, int lda, const float* bt, int ldbt,
+                   float* c, int ldc) {
+    // columns in groups of 4: n = 8 reads each row of A twice, still far cheaper than packing
+    for (int j0 = 0; j0 < n; j0 += 4) {
+        const int nj = n - j0 < 4 ? n - j0 : 4;
+        int i = 0;
+        for (; i + 4 <= m; i += 4) {
+            skinny_rows<4>(nj, k, a + i * lda, lda, bt + j0 * ldbt, ldbt, c + i * ldc + j0, ldc);
+        }
+        for (; i < m; ++i) {
+            skinny_rows<1>(nj, k, a + i * lda, lda, bt + j0 * ldbt, ldbt, c + i * ldc + j0, ldc);
+        }
+    }
+}
+
 }  // namespace
 
-KernelInfo avx512_kernel() { return {"avx512", MR, NR, kernel_12x32}; }
+KernelInfo avx512_kernel() { return {"avx512", MR, NR, kernel_12x32, skinny_avx512}; }
 
 double peak_gflops_avx512(long iters) {
     __m512 x[12];

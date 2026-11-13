@@ -10,12 +10,22 @@ namespace tinyinfer::kernels::detail {
 using MicroKernel = void (*)(int kc, const float* a, const float* b, float* c, int ldc, int h,
                              int w);
 
+/// Skinny GEMM for a handful of columns: C[m x n] += A[m x k] * Bt^T, where Bt is op(B) stored
+/// transposed (n x k, row-major). A is read in place, no packing: when n is tiny every weight
+/// is used n times only, so packing it would cost more than the multiply.
+using SkinnyKernel = void (*)(int m, int n, int k, const float* a, int lda, const float* bt,
+                              int ldbt, float* c, int ldc);
+
 struct KernelInfo {
     const char* name;
     int mr;
     int nr;
     MicroKernel fn;
+    SkinnyKernel skinny;
 };
+
+void skinny_scalar(int m, int n, int k, const float* a, int lda, const float* bt, int ldbt,
+                   float* c, int ldc);
 
 KernelInfo scalar_kernel();
 #if defined(__x86_64__) || defined(_M_X64)

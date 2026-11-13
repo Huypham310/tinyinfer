@@ -67,9 +67,56 @@ void kernel_6x16(int kc, const float* a, const float* b, float* c, int ldc, int 
     }
 }
 
+float hsum(__m256 v) {
+    const __m128 s = _mm_add_ps(_mm256_castps256_ps128(v), _mm256_extractf128_ps(v, 1));
+    const __m128 s2 = _mm_add_ps(s, _mm_movehl_ps(s, s));
+    return _mm_cvtss_f32(_mm_add_ss(s2, _mm_shuffle_ps(s2, s2, 1)));
+}
+
+/// Same idea as the AVX-512 skinny kernel with half the registers: 4 rows x 2 columns = 8 ymm
+/// accumulators + 4 rows of A + 1 of Bt fits in 16.
+template <int R, int NJ>
+void skinny_block(int k, const float* a, int lda, const float* bt, int ldbt, float* c, int ldc) {
+    __m256 acc[R][NJ];
+    for (int r = 0; r < R; ++r)
+        for (int j = 0; j < NJ; ++j) acc[r][j] = _mm256_setzero_ps();
+    int p = 0;
+    for (; p + 8 <= k; p += 8) {
+        __m256 av[R];
+        for (int r = 0; r < R; ++r) av[r] = _mm256_loadu_ps(a + r * lda + p);
+        for (int j = 0; j < NJ; ++j) {
+            const __m256 bv = _mm256_loadu_ps(bt + j * ldbt + p);
+            for (int r = 0; r < R; ++r) acc[r][j] = _mm256_fmadd_ps(av[r], bv, acc[r][j]);
+        }
+    }
+    for (int r = 0; r < R; ++r) {
+        for (int j = 0; j < NJ; ++j) {
+            float s = hsum(acc[r][j]);
+            for (int q = p; q < k; ++q) s += a[r * lda + q] * bt[j * ldbt + q];  // k tail
+            c[r * ldc + j] += s;
+        }
+    }
+}
+
+void skinny_avx2(int m, int n, int k, const float* a, int lda, const float* bt, int ldbt,
+                 float* c, int ldc) {
+    for (int j0 = 0; j0 < n; j0 += 2) {
+        const bool two = n - j0 >= 2;
+        int i = 0;
+        for (; i + 4 <= m; i += 4) {
+            if (two) skinny_block<4, 2>(k, a + i * lda, lda, bt + j0 * ldbt, ldbt, c + i * ldc + j0, ldc);
+            else skinny_block<4, 1>(k, a + i * lda, lda, bt + j0 * ldbt, ldbt, c + i * ldc + j0, ldc);
+        }
+        for (; i < m; ++i) {
+            if (two) skinny_block<1, 2>(k, a + i * lda, lda, bt + j0 * ldbt, ldbt, c + i * ldc + j0, ldc);
+            else skinny_block<1, 1>(k, a + i * lda, lda, bt + j0 * ldbt, ldbt, c + i * ldc + j0, ldc);
+        }
+    }
+}
+
 }  // namespace
 
-KernelInfo avx2_kernel() { return {"avx2", MR, NR, kernel_6x16}; }
+KernelInfo avx2_kernel() { return {"avx2", MR, NR, kernel_6x16, skinny_avx2}; }
 
 double peak_gflops_avx2(long iters) {
     // 10 independent accumulator chains: enough to cover FMA latency (4 cycles) x 2 ports

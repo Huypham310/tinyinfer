@@ -21,12 +21,22 @@
       "name": "native",
       "inherits": "base",
       "cacheVariables": { "CMAKE_BUILD_TYPE": "Release", "TINYINFER_NATIVE": "ON" }
+    },
+    {
+      "name": "bench",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "TINYINFER_BUILD_BENCH": "ON",
+        "TINYINFER_BUILD_TESTS": "OFF"
+      }
     }
   ],
   "buildPresets": [
     { "name": "debug", "configurePreset": "debug" },
     { "name": "release", "configurePreset": "release" },
-    { "name": "native", "configurePreset": "native" }
+    { "name": "native", "configurePreset": "native" },
+    { "name": "bench", "configurePreset": "bench" }
   ],
   "testPresets": [
     { "name": "debug", "configurePreset": "debug", "output": { "outputOnFailure": true } },

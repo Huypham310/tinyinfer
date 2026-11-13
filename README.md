@@ -148,7 +148,7 @@ max |diff| vs reference: 2.38e-07
 
 The reference is ONNX Runtime's output for the same input (`tools/ort_reference.py`); the C++ parity tests cover the three small fixtures (Conv + Relu, Reshape / Gemm / Clip, Conv + BN + Relu + pooling + Gemm + Softmax) and the full ResNet-18 when `TINYINFER_RESNET18` / `TINYINFER_RESNET18_REF` are set.
 
-**Correct, not fast yet.** ONNX Runtime runs this model in ~1.8 ms; TinyInfer takes ~13.7 ms. `TINYINFER_PROFILE=1` prints per-op times, and the late convolutions dominate: 512 -> 512 channels on a 2 x 2 feature map is a GEMM with M = 512, N = 4, K = 4608, which wastes most of a 12 x 32 tile and re-packs 9.4 MB of weights on every call (~10 GFLOP/s). Profiling also caught a real bug: the GEMM went multithreaded on total work, and these shapes ran **3x slower with 24 threads than with one** (two barriers per k-block, 18 k-blocks). Gating threads on the work between barriers took the model from 34.6 to 13.7 ms. Pre-packing weights once at load time and a small-N kernel are the next steps (bench phase).
+**Correct first, then fast.** At this point ONNX Runtime ran the model in ~1.8 ms and TinyInfer in ~13.7 ms. `TINYINFER_PROFILE=1` prints per-op times, and the late convolutions dominated: 512 -> 512 channels on a 2 x 2 feature map is a GEMM with M = 512, N = 4, K = 4608, which wastes most of a 12 x 32 tile and re-packs 9.4 MB of weights on every call (~10 GFLOP/s). Profiling also caught a real bug: the GEMM went multithreaded on total work, and these shapes ran **3x slower with 24 threads than with one** (two barriers per k-block, 18 k-blocks). Gating threads on the work between barriers took the model from 34.6 to 13.7 ms. The fixes for the rest are in [Benchmarks](#benchmarks).
 
 ## INT8 quantization
 
@@ -169,7 +169,81 @@ $ tinyinfer eval terrasense/artifacts/model.onnx --data build/eval --batch 100
 ```
 
 - The fp32 accuracy is exactly the 98.19% TerraSense reports with ONNX Runtime on the same split: the whole engine, end to end, on 2,700 real images.
-- INT8 costs 0.12 points (ONNX Runtime's static INT8 on this model: 98.11%) and runs 2.5x faster than TinyInfer's own fp32. Absolute speed is still behind ONNX Runtime: convolutions run one image at a time, so the late 2 x 2 layers are GEMMs with N = 4 whatever the batch size, which batching the im2col across images would fix.
+- INT8 costs 0.12 points (ONNX Runtime's static INT8 on this model: 98.11%) and ran 2.5x faster than TinyInfer's fp32 *at the time*. The bench phase then made fp32 much faster (skinny GEMM, batched im2col) and the gap shrank; see [Benchmarks](#benchmarks).
+
+## Benchmarks
+
+All numbers in this section come from `scripts/bench_linux.sh`, run in a `python:3.12` container
+(Linux, GCC 12) on the same laptop (Ryzen AI 9 HX 370: 4 Zen 5 + 8 Zen 5c cores, SMT), with
+ONNX Runtime 1.31 installed in the same container:
+
+```bash
+docker run --rm -v "$PWD:/src" -v /path/to/terrasense/artifacts:/model:ro -w /src \
+    python:3.12 bash scripts/bench_linux.sh
+```
+
+(Windows Smart App Control kept blocking the freshly built benchmark exe, so the container is
+also the easiest way to get repeatable runs.) Raw Google Benchmark output:
+[`bench/results/linux.json`](bench/results/linux.json).
+
+### ResNet-18 end to end (TerraSense model, 3 x 64 x 64, 4 threads)
+
+| batch | before this phase | now | speed-up | ONNX Runtime | vs ORT |
+|---|---|---|---|---|---|
+| 1 | 14.46 ms | 5.12 ms | 2.8x | 1.76 ms | 2.9x slower |
+| 8 | 96.0 ms (12.0 ms/img) | 26.8 ms (3.3 ms/img) | 3.6x | 9.4 ms | 2.8x slower |
+| 32 | 399 ms (12.5 ms/img) | 90.0 ms (2.8 ms/img) | 4.4x | 34.4 ms | 2.6x slower |
+
+"Before" is `main` at the end of the INT8 phase, built and run in the same container. Medians;
+both engines on 4 threads, which is the fastest setting for both at batch 1 on this CPU
+(ONNX Runtime's default of 12 threads takes 3.1 ms). On the 2,700-image EuroSAT eval
+(`tinyinfer eval`, batch 100) fp32 now takes 3.40 ms/image in the container (10.89 natively on
+Windows before this phase), accuracy unchanged at 98.19%.
+
+### What changed
+
+1. **Skinny GEMM for few columns.** At batch 1 the late convs are GEMMs with N = 4 (layer 4) or
+   16 (layer 3). The packed path wastes most of a 32-wide tile and re-packs MBs of weights per
+   call; the new kernel computes C = A * B^T as dot products straight off the weights (4 rows x 4
+   columns = 16 zmm accumulators, masked loads for the k tail). `BM_GemmFewColumns` (512 x n x 4608)
+   put the cutoff at n = 32:
+
+   | n | 1 | 4 | 8 | 16 | 32 | 64 (packed) |
+   |---|---|---|---|---|---|---|
+   | GFLOP/s | 44 | 183 | 239 | 300 | 169 | 212 |
+
+   The packed kernel managed ~62 GFLOP/s at n = 32 before the switch.
+2. **Batched im2col.** Convolutions used to run one image at a time, so N stayed at 4 for the
+   late layers whatever the batch. Now several images' columns sit side by side in one matrix
+   (capped at ~8 MB), and one GEMM covers them all; the int8 conv got the same treatment.
+3. **OpenMP team sizes.** The biggest surprise. A batch-32 64-channel conv took 32.7 ms with the
+   default 24 threads, 10.4 ms with 1 and 4.9 ms with 4: a memory-bound im2col region with all
+   24 threads followed by a 4-thread GEMM left 20 threads spinning on the SMT siblings of the
+   working ones. Every parallel region now asks `par::team_size(work, per_thread)` for a team
+   that fits its work, capped at one thread per physical core (ONNX Runtime's default too;
+   `TINYINFER_THREADS` overrides it). The same fix took the skinny GEMM at n = 1 from 410 to 42 us.
+
+### Kernels (Google Benchmark, `tinyinfer_bench`)
+
+| benchmark | result |
+|---|---|
+| GEMM 512^3, one core: scalar / AVX2 / AVX-512 | 7.8 / 107 / 121 GFLOP/s |
+| conv layer 4 (512 ch, 2 x 2), batch 1: fp32 / int8 | 149 / 358 us |
+| conv layer 4, batch 32: fp32 / int8 | 3.51 / 1.96 ms (172 / 308 GFLOP/s) |
+| conv layer 3 (256 ch, 4 x 4), batch 32: fp32 / int8 | 4.84 / 2.63 ms |
+
+The scalar GEMM is 6x slower here than with MinGW GCC 14 on Windows (49 GFLOP/s): GCC 12 doesn't
+vectorize the 4 x 16 fallback loop as well. The SIMD kernels are within 15-20% of the Windows
+numbers.
+
+### Where ONNX Runtime still wins
+
+The remaining ~2.8x is mostly in the first layers: the 7 x 7 stem and the 64-channel 3 x 3
+convs run at 50-95 GFLOP/s because im2col writes (and the GEMM re-reads) a copy of the input
+9-12x its size. ONNX Runtime (MLAS) uses NCHWc blocked layouts and direct convolution for
+these. INT8 only beats fp32 on the wide layers: at layer 4 batch 1 it's 2.4x *slower*, because
+the u8 quantize + im2col pass costs more than the VNNI GEMM saves on 4 columns, and end to end
+it's now about as fast as fp32 (eval: 3.56 vs 3.40 ms/image).
 
 ## Build
 
@@ -184,6 +258,10 @@ ctest --preset release
 ```
 
 `--info` prints the SIMD features the engine detected on your CPU.
+
+The `bench` preset builds the Google Benchmark suite (`build/bench/bench/tinyinfer_bench`; set
+`TINYINFER_RESNET18` to the model for the end-to-end cases). Threads default to one per physical
+core; `TINYINFER_THREADS=N` changes that (e.g. 24 to reproduce the `bench-gemm` scaling table).
 
 ## License
 
