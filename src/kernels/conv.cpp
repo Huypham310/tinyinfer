@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -47,14 +48,15 @@ ConvShape check(const Tensor& x, const Tensor& w, const Tensor* bias, const Conv
 
 /// Unrolls the receptive fields of one image's channel group into a (cg*kh*kw) x (oh*ow)
 /// matrix, so the convolution becomes one GEMM with the (ocg) x (cg*kh*kw) weight matrix.
-void im2col(const float* x, const ConvShape& s, const Conv2dParams& p, float* cols) {
-    const int pixels = s.oh * s.ow;
+/// `ld` is the row stride of `cols`: several images can sit side by side in one wide matrix.
+void im2col(const float* x, const ConvShape& s, const Conv2dParams& p, float* cols,
+            std::size_t ld) {
     for (int ci = 0; ci < s.cg; ++ci) {
         const float* plane = x + static_cast<std::size_t>(ci) * s.h * s.w;
         for (int ky = 0; ky < s.kh; ++ky) {
             for (int kx = 0; kx < s.kw; ++kx) {
                 float* row = cols + (static_cast<std::size_t>(ci) * s.kh * s.kw + ky * s.kw + kx) *
-                                        pixels;
+                                        ld;
                 for (int oy = 0; oy < s.oh; ++oy) {
                     const int iy = oy * p.stride[0] - p.pads[0] + ky * p.dilation[0];
                     float* out = row + oy * s.ow;
@@ -94,22 +96,60 @@ Tensor conv2d(const Tensor& x, const Tensor& w, const Tensor* bias, const Conv2d
     // a 1x1, stride-1, unpadded conv *is* a GEMM on the input as stored: skip the copy
     const bool pointwise = s.kh == 1 && s.kw == 1 && p.stride[0] == 1 && p.stride[1] == 1 &&
                            p.pads[0] == 0 && p.pads[1] == 0 && p.pads[2] == 0 && p.pads[3] == 0;
-    std::vector<float> cols(pointwise ? 0 : static_cast<std::size_t>(kdim) * pixels);
+    // Images per GEMM: one image at a time leaves the late layers with n = oh*ow = 4 columns
+    // whatever the batch, so put several images' columns side by side instead. Capped so the
+    // column matrix stays around 8 MB (layer 1 of ResNet-18 at 64x64: ~13 images).
+    constexpr std::size_t kColsBudget = std::size_t{2} << 20;  // floats
+    const std::size_t per_image = static_cast<std::size_t>(kdim) * pixels;
+    const int chunk = std::max(1, std::min(s.n, static_cast<int>(kColsBudget / per_image)));
 
     const float* xd = x.data<float>();
     const float* wd = w.data<float>();
     float* yd = y.data<float>();
-    for (int n = 0; n < s.n; ++n) {
+    if (chunk == 1) {
+        std::vector<float> cols(pointwise ? 0 : per_image);
+        for (int n = 0; n < s.n; ++n) {
+            for (int g = 0; g < p.groups; ++g) {
+                const float* xg = xd + (static_cast<std::size_t>(n) * s.c + g * s.cg) * s.h * s.w;
+                const float* b = xg;
+                if (!pointwise) {
+                    im2col(xg, s, p, cols.data(), pixels);
+                    b = cols.data();
+                }
+                const float* wg = wd + static_cast<std::size_t>(g) * s.ocg * kdim;
+                float* yg = yd + (static_cast<std::size_t>(n) * s.oc + g * s.ocg) * pixels;
+                gemm(s.ocg, pixels, kdim, wg, kdim, b, pixels, false, yg, pixels);
+            }
+        }
+        add_bias(yd, bias, s);
+        return y;
+    }
+
+    std::vector<float> cols(per_image * chunk);
+    std::vector<float> out(static_cast<std::size_t>(s.ocg) * pixels * chunk);
+    for (int n0 = 0; n0 < s.n; n0 += chunk) {
+        const int cnt = std::min(chunk, s.n - n0);
+        const std::size_t ld = static_cast<std::size_t>(cnt) * pixels;
         for (int g = 0; g < p.groups; ++g) {
-            const float* xg = xd + (static_cast<std::size_t>(n) * s.c + g * s.cg) * s.h * s.w;
-            const float* b = xg;
-            if (!pointwise) {
-                im2col(xg, s, p, cols.data());
-                b = cols.data();
+            // images write disjoint column blocks, so im2col splits across threads for free
+#pragma omp parallel for schedule(static) if (ld * kdim >= (std::size_t{1} << 20))
+            for (int i = 0; i < cnt; ++i) {
+                const float* xg =
+                    xd + (static_cast<std::size_t>(n0 + i) * s.c + g * s.cg) * s.h * s.w;
+                im2col(xg, s, p, cols.data() + static_cast<std::size_t>(i) * pixels, ld);
             }
             const float* wg = wd + static_cast<std::size_t>(g) * s.ocg * kdim;
-            float* yg = yd + (static_cast<std::size_t>(n) * s.oc + g * s.ocg) * pixels;
-            gemm(s.ocg, pixels, kdim, wg, kdim, b, pixels, false, yg, pixels);
+            const int cols_n = static_cast<int>(ld);
+            gemm(s.ocg, cols_n, kdim, wg, kdim, cols.data(), cols_n, false, out.data(), cols_n);
+            // GEMM output is [ocg, image, pixel]; NCHW wants [image, oc, pixel]
+            for (int o = 0; o < s.ocg; ++o) {
+                for (int i = 0; i < cnt; ++i) {
+                    const float* src = out.data() + o * ld + static_cast<std::size_t>(i) * pixels;
+                    float* dst =
+                        yd + ((static_cast<std::size_t>(n0 + i) * s.oc + g * s.ocg + o) * pixels);
+                    std::copy(src, src + pixels, dst);
+                }
+            }
         }
     }
     add_bias(yd, bias, s);

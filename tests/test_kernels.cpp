@@ -141,7 +141,11 @@ INSTANTIATE_TEST_SUITE_P(
         ConvCase{1, 8, 10, 12, 8, 3, {{1, 2}, {0, 1, 2, 0}, {1, 1}, 1}},
         ConvCase{1, 8, 12, 12, 16, 3, {{1, 1}, {2, 2, 2, 2}, {2, 2}, 1}},
         ConvCase{2, 8, 9, 9, 12, 3, {{1, 1}, {1, 1, 1, 1}, {1, 1}, 4}},
-        ConvCase{1, 16, 8, 8, 16, 3, {{1, 1}, {1, 1, 1, 1}, {1, 1}, 16}}));
+        ConvCase{1, 16, 8, 8, 16, 3, {{1, 1}, {1, 1, 1, 1}, {1, 1}, 16}},
+        // batched im2col: 3 images where only 2 fit the column budget (chunk + tail), and a
+        // late-layer 2x2 map where 5 images become one 20-column GEMM
+        ConvCase{3, 32, 56, 56, 8, 3, {{1, 1}, {1, 1, 1, 1}, {1, 1}, 1}},
+        ConvCase{5, 64, 2, 2, 32, 3, {{1, 1}, {1, 1, 1, 1}, {1, 1}, 1}}));
 
 TEST(Conv, RejectsMismatchedShapes) {
     const Tensor x = random_tensor(Shape{1, 4, 8, 8}, 1);
