@@ -5,6 +5,10 @@
 #include <string>
 #include <vector>
 
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
 #include "microkernels.hpp"
 #include "tinyinfer/cpu_features.hpp"
 #include "tinyinfer/kernels.hpp"
@@ -78,6 +82,11 @@ constexpr int KC = 256;
 constexpr int NC = 512;
 // at or below this many columns gemm() skips packing and uses the skinny dot-product kernel
 constexpr int kSkinnyMaxN = 16;
+// smallest slice of B (in micro-panels) worth a task of its own
+constexpr int kPanelsPerTask = 2;
+// MACs each thread should get between two barriers (~30 us of micro-kernel time); fewer and
+// the barrier + wake-up cost eats the gain, especially on the slow Zen 5c cores
+constexpr double kWorkPerThread = 2e6;
 
 /// Copies a kc x nc block of op(B) into nr-wide column panels: panel j holds rows 0..kc-1 of
 /// columns [j*nr, j*nr + nr), zero-padded past nc, so the micro-kernel reads B sequentially.
@@ -230,12 +239,22 @@ void gemm(int m, int n, int k, const float* a, int lda, const float* b, int ldb,
     // Threads only pay off with enough work *between barriers*: every (j0, p0) step syncs all
     // threads twice. A total-work threshold (m*n*k) let conv-sized GEMMs like 512x4x4608 go
     // parallel and run 3x slower than one thread: 18 k-blocks x 2 barriers x 24 threads.
+    // Same idea for the team size: all-or-nothing was wrong too. A batched 64-channel conv has
+    // ~8M MACs per step; 24 threads ran it 2x slower than one, 4 threads 1.5x faster.
     const double work_per_step =
         static_cast<double>(m) * std::min(n, NC) * std::min(k, KC);
-    const bool parallel = work_per_step >= 8e6 && m_blocks > 1;
-    (void)parallel;
+    int threads = 1;
+#ifdef _OPENMP
+    // below ~8M MACs per step even 2 threads lost at batch 1 (5.5 -> 7.7 ms on ResNet-18)
+    if (work_per_step >= 4 * kWorkPerThread && (m_blocks > 1 || n >= 2 * kPanelsPerTask * nr)) {
+        threads = static_cast<int>(
+            std::min<double>(omp_get_max_threads(), work_per_step / kWorkPerThread));
+        threads = std::max(threads, 1);
+    }
+#endif
+    (void)threads;
 
-#pragma omp parallel if (parallel)
+#pragma omp parallel num_threads(threads) if (threads > 1)
     {
         for (int j0 = 0; j0 < n; j0 += NC) {
             const int nc = std::min(NC, n - j0);
@@ -250,17 +269,31 @@ void gemm(int m, int n, int k, const float* a, int lda, const float* b, int ldb,
                     pack_b(kc, std::min(nr, nc - jp), nr, b, ldb, trans_b, p0, j0 + jp,
                            bshared + static_cast<std::size_t>(jp) * kc);
                 }
+                // Batched convs are short and very wide (M = 64 channels, N = 13k pixels), so
+                // M blocks alone can't feed 24 threads; split the panels of B too when needed.
+                // Each (block, panel group) task re-packs its A block, ~4% extra copying.
+                int groups = 1;
+#ifdef _OPENMP
+                if (m_blocks < omp_get_num_threads()) {
+                    groups = std::max(1, std::min(panels / kPanelsPerTask,
+                                                  omp_get_num_threads() / m_blocks + 1));
+                }
+#endif
+                const int panels_per_group = (panels + groups - 1) / groups;
                 // dynamic: this laptop mixes fast and slow cores (Zen 5 / Zen 5c), a static
                 // split leaves the fast ones idle waiting for the slow ones
 #pragma omp for schedule(dynamic, 1)
-                for (int blk = 0; blk < m_blocks; ++blk) {
-                    // each thread packs its own A block: rows of C don't overlap between blocks
+                for (int task = 0; task < m_blocks * groups; ++task) {
+                    const int blk = task / groups;
+                    const int grp = task % groups;
+                    // each task packs its own A block: tasks never write the same part of C
                     thread_local std::vector<float> apack;
                     apack.resize(apack_size);
                     const int i0 = blk * MC;
                     const int mc = std::min(MC, m - i0);
                     pack_a(mc, kc, mr, a + i0 * lda + p0, lda, apack.data());
-                    for (int jp = 0; jp < nc; jp += nr) {
+                    const int jp_end = std::min(nc, (grp + 1) * panels_per_group * nr);
+                    for (int jp = grp * panels_per_group * nr; jp < jp_end; jp += nr) {
                         const float* bp = bshared + static_cast<std::size_t>(jp) * kc;
                         for (int ip = 0; ip < mc; ip += mr) {
                             const float* ap = apack.data() + static_cast<std::size_t>(ip) * kc;
