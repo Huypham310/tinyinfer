@@ -11,6 +11,12 @@ option(TINYINFER_BUILD_TESTS "Build unit tests" ON)
 option(TINYINFER_NATIVE "Compile with -march=native" OFF)
 option(TINYINFER_OPENMP "Multithread GEMM with OpenMP" ON)
 option(TINYINFER_BUILD_BENCH "Build Google Benchmark suite" OFF)
+option(TINYINFER_BUILD_PYTHON "Build the pybind11 module (pip install . sets this)" OFF)
+
+if(TINYINFER_BUILD_PYTHON)
+  # the static library gets linked into a shared Python module
+  set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+endif()
 
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
@@ -88,4 +94,11 @@ endif()
 
 if(TINYINFER_BUILD_BENCH)
   add_subdirectory(bench)
+endif()
+
+if(TINYINFER_BUILD_PYTHON)
+  find_package(pybind11 CONFIG REQUIRED)
+  pybind11_add_module(_tinyinfer python/tinyinfer_py.cpp)
+  target_link_libraries(_tinyinfer PRIVATE tinyinfer)
+  install(TARGETS _tinyinfer DESTINATION tinyinfer)
 endif()
