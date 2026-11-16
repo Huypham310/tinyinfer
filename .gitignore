@@ -7,7 +7,8 @@ CMakeUserPresets.json
 
 # Models and benchmark output
 /models/*.onnx
-/bench/results/
+/bench/results/*
+!/bench/results/linux.json
 
 # Python
 __pycache__/

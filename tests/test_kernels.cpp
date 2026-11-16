@@ -74,8 +74,34 @@ INSTANTIATE_TEST_SUITE_P(Kernels, GemmSizes,
                                            std::make_tuple(4, 16, 256), std::make_tuple(5, 17, 257),
                                            std::make_tuple(64, 64, 64), std::make_tuple(65, 513, 300),
                                            std::make_tuple(130, 40, 600), std::make_tuple(7, 1000, 3),
-                                           // few columns: takes the transposed path
-                                           std::make_tuple(512, 4, 4608), std::make_tuple(96, 3, 70)));
+                                           // n <= 32 goes through the skinny kernel: column
+                                           // groups, row tails and k tails, plus 33 (packed again)
+                                           std::make_tuple(512, 4, 4608), std::make_tuple(96, 3, 70),
+                                           std::make_tuple(6, 16, 33), std::make_tuple(9, 15, 17),
+                                           std::make_tuple(33, 17, 31), std::make_tuple(258, 7, 1),
+                                           std::make_tuple(20, 32, 45), std::make_tuple(21, 33, 45)));
+
+TEST(Gemm, SkinnyRespectsLeadingDims) {
+    // A and C as sub-blocks of wider matrices: the skinny kernel must step by lda / ldc, not k / n
+    constexpr int m = 13, n = 5, k = 37, lda = 50, ldb = 9, ldc = 11;
+    const Tensor a = random_tensor(Shape{m, lda}, 3);
+    const Tensor b = random_tensor(Shape{k, ldb}, 4);
+    const std::string original = gemm_isa();
+    for (const char* isa : {"scalar", "avx2", "avx512"}) {
+        if (!set_gemm_isa(isa)) continue;
+        std::vector<float> want(m * ldc, 7.0F), got(m * ldc, 7.0F);
+        gemm_naive(m, n, k, a.data<float>(), lda, b.data<float>(), ldb, false, want.data(), ldc);
+        gemm(m, n, k, a.data<float>(), lda, b.data<float>(), ldb, false, got.data(), ldc);
+        for (int i = 0; i < m; ++i) {
+            for (int j = 0; j < ldc; ++j) {
+                // columns past n belong to someone else and must stay untouched
+                if (j >= n) EXPECT_EQ(got[i * ldc + j], 7.0F) << isa;
+                else EXPECT_NEAR(got[i * ldc + j], want[i * ldc + j], 1e-4F) << isa;
+            }
+        }
+    }
+    set_gemm_isa(original.c_str());
+}
 
 TEST(Gemm, AccumulateAddsToC) {
     const float a[] = {1, 2, 3, 4};  // 2x2
@@ -116,7 +142,11 @@ INSTANTIATE_TEST_SUITE_P(
         ConvCase{1, 8, 10, 12, 8, 3, {{1, 2}, {0, 1, 2, 0}, {1, 1}, 1}},
         ConvCase{1, 8, 12, 12, 16, 3, {{1, 1}, {2, 2, 2, 2}, {2, 2}, 1}},
         ConvCase{2, 8, 9, 9, 12, 3, {{1, 1}, {1, 1, 1, 1}, {1, 1}, 4}},
-        ConvCase{1, 16, 8, 8, 16, 3, {{1, 1}, {1, 1, 1, 1}, {1, 1}, 16}}));
+        ConvCase{1, 16, 8, 8, 16, 3, {{1, 1}, {1, 1, 1, 1}, {1, 1}, 16}},
+        // batched im2col: 3 images where only 2 fit the column budget (chunk + tail), and a
+        // late-layer 2x2 map where 5 images become one 20-column GEMM
+        ConvCase{3, 32, 56, 56, 8, 3, {{1, 1}, {1, 1, 1, 1}, {1, 1}, 1}},
+        ConvCase{5, 64, 2, 2, 32, 3, {{1, 1}, {1, 1, 1, 1}, {1, 1}, 1}}));
 
 TEST(Conv, RejectsMismatchedShapes) {
     const Tensor x = random_tensor(Shape{1, 4, 8, 8}, 1);
