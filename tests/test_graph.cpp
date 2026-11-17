@@ -1,10 +1,12 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "proto_writer.hpp"
@@ -143,6 +145,127 @@ TEST(Graph, UnsupportedOpsFailAtLoadTime) {
     } catch (const GraphError& e) {
         EXPECT_NE(std::string(e.what()).find("LSTM"), std::string::npos);
     }
+}
+
+namespace {
+
+/// One-node model "y = op(x)" with an optional int attribute / ints attribute, an optional
+/// custom domain and an optional second output, for the load-time error paths.
+std::string one_op_model(const char* op, const char* attr = nullptr, std::int64_t attr_value = 0,
+                         const char* domain = nullptr, bool two_outputs = false,
+                         bool ints_attr = false) {
+    using test_proto::Writer;
+    auto value = [](const char* name) {
+        Writer d1, d2, shape, tt, type, v;
+        d1.int_field(1, 2);
+        d2.int_field(1, 4);
+        shape.message(1, d1).message(1, d2);
+        tt.int_field(1, 1).message(2, shape);
+        type.message(1, tt);
+        v.bytes_field(1, name).message(2, type);
+        return v;
+    };
+    Writer node;
+    node.bytes_field(1, "x").bytes_field(2, "y");
+    if (two_outputs) node.bytes_field(2, "y2");
+    node.bytes_field(4, op);
+    if (attr != nullptr) {
+        Writer a;
+        a.bytes_field(1, attr);
+        if (ints_attr) a.int_field(8, attr_value).int_field(20, 7);  // INTS
+        else a.int_field(3, attr_value).int_field(20, 2);            // INT
+        node.message(5, a);
+    }
+    if (domain != nullptr) node.bytes_field(7, domain);
+    Writer graph;
+    graph.message(1, node).message(11, value("x")).message(12, value("y"));
+    Writer model;
+    model.int_field(1, 8).message(7, graph);
+    return model.str();
+}
+
+onnx::Model parse(const std::string& bytes) {
+    return onnx::parse_model(reinterpret_cast<const std::uint8_t*>(bytes.data()), bytes.size());
+}
+
+}  // namespace
+
+TEST(Graph, RejectsUnsupportedAttributesAtLoadTime) {
+    struct Case {
+        std::string bytes;
+        const char* needle;  // must show up in the error message
+    };
+    const std::vector<Case> cases = {
+        {one_op_model("MaxPool", "ceil_mode", 1), "ceil_mode"},
+        {one_op_model("Flatten", "axis", 2), "Flatten"},
+        {one_op_model("Gemm", "transA", 1), "transA"},
+        {one_op_model("ReduceMean", "axes", 1, nullptr, false, true), "ReduceMean"},
+        {one_op_model("Relu", nullptr, 0, "com.microsoft"), "custom domain"},
+        {one_op_model("Relu", nullptr, 0, nullptr, true), "several outputs"},
+    };
+    for (const auto& c : cases) {
+        try {
+            Graph g(parse(c.bytes), {});
+            ADD_FAILURE() << "expected GraphError mentioning '" << c.needle << "'";
+        } catch (const GraphError& e) {
+            EXPECT_NE(std::string(e.what()).find(c.needle), std::string::npos) << e.what();
+        }
+    }
+    // the same builder with an accepted op still loads, so the helper itself is fine
+    EXPECT_NO_THROW(Graph(parse(one_op_model("Relu")), {}));
+    EXPECT_NO_THROW(Graph(parse(one_op_model("Relu", nullptr, 0, "ai.onnx")), {}));
+}
+
+TEST(Graph, ExecutorProfilingRecordsOneTimePerNode) {
+    const auto model = onnx::load_model(data_dir() / "conv_bn_head.onnx");
+    Graph g(model, {{"x", Shape{2, 3, 16, 16}}});
+    Tensor x2(Shape{2, 3, 16, 16}, DType::Float32);
+    for (std::int64_t i = 0; i < x2.numel(); ++i) {
+        x2.data<float>()[i] = std::sin(0.01F * static_cast<float>(i));  // deterministic, non-trivial
+    }
+
+    Executor ex(g);
+    EXPECT_TRUE(ex.node_ms().empty());  // profiling is off by default: nothing recorded
+    const auto plain = ex.run({{"x", x2}});
+    EXPECT_TRUE(ex.node_ms().empty());
+
+    ex.set_profiling(true);
+    const auto timed = ex.run({{"x", x2}});
+    ASSERT_EQ(ex.node_ms().size(), g.nodes().size());
+    double total = 0.0;
+    for (double ms : ex.node_ms()) {
+        EXPECT_GE(ms, 0.0);
+        total += ms;
+    }
+    EXPECT_GT(total, 0.0);
+    // timing must not change the numbers
+    EXPECT_FLOAT_EQ(max_abs_diff(plain[0], timed[0]), 0.0F);
+
+    // a second run overwrites the vector instead of growing it
+    ex.run({{"x", x2}});
+    EXPECT_EQ(ex.node_ms().size(), g.nodes().size());
+}
+
+TEST(Graph, ExecutorObservesConvInputRanges) {
+    const auto model = onnx::load_model(data_dir() / "conv_relu.onnx");
+    Graph g(model, {{"x", Shape{1, 3, 8, 8}}});
+    ASSERT_EQ(g.nodes()[0].kind, OpKind::Conv);
+    Tensor x(Shape{1, 3, 8, 8}, DType::Float32);
+    for (std::int64_t i = 0; i < x.numel(); ++i) {
+        x.data<float>()[i] = static_cast<float>(i % 11) - 4.0F;  // -4 .. 6
+    }
+    // same convention as quant::calibrate: start inverted, the executor widens it
+    std::vector<std::pair<float, float>> ranges(g.nodes().size(), {1e30F, -1e30F});
+    Executor ex(g);
+    ex.observe_conv_inputs(&ranges);
+    ex.run({{"x", x}});
+    EXPECT_FLOAT_EQ(ranges[0].first, -4.0F);
+    EXPECT_FLOAT_EQ(ranges[0].second, 6.0F);
+    // a second batch with a wider max widens the range, never shrinks it
+    x.data<float>()[0] = 20.0F;
+    ex.run({{"x", x}});
+    EXPECT_FLOAT_EQ(ranges[0].first, -4.0F);
+    EXPECT_FLOAT_EQ(ranges[0].second, 20.0F);
 }
 
 TEST(Graph, LivenessFreesIntermediates) {
