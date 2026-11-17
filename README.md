@@ -268,9 +268,47 @@ int8 batch8: median 41.3 ms (5.16 ms/img)
 ```
 
 Crossing the Python boundary costs almost nothing next to the model: 4.50 ms vs 5.12 ms for the
-same batch-1 run through the C++ CLI (noise). Five pytest cases cover the ISA override, a
-Conv+ReLU fixture end to end, input validation, INT8 calibration changing the output a little,
-and the peak-memory counter.
+same batch-1 run through the C++ CLI (noise). The pytest cases are listed under [Tests](#tests).
+
+## Tests
+
+```bash
+cmake --preset release && cmake --build --preset release
+ctest --preset release                      # C++ (GoogleTest)
+pip install . pytest && pytest              # Python bindings
+```
+
+- **C++ (gtest)**: tensors / layouts, the protobuf wire reader and ONNX loader (including cutting a
+  model at every byte and flipping random bytes), every kernel against its naive reference, graph
+  passes, the executor, and INT8. Three small ONNX fixtures under `tests/data` come with
+  ONNX Runtime's output for the same input, so `Graph` + `Executor` are checked against ORT, not
+  just against themselves. Edge cases covered on purpose: `clip` / `relu_inplace`, executor
+  profiling and range observation, load-time errors for unsupported attributes, `groups != 1`
+  refused by the INT8 path, `set_int8_isa` refusing unknown / unsupported kernels.
+- **Python (pytest)**: `Session.run` against the same ORT golden outputs (`conv_relu`,
+  `conv_bn_head`), the 2-D `mixed_types` model loading but being refused by `run`, the INT8
+  ISA override and refuse path, and scalar vs VNNI INT8 giving the same output.
+- Models that need external files (`TINYINFER_RESNET18`, `TINYINFER_RESNET18_REF`) are skipped
+  when not set; everything else is self-contained.
+
+### Coverage
+
+`-DTINYINFER_COVERAGE=ON` builds the library and tests at `-O0 -g --coverage` (GCC or Clang;
+it is a Debug build on purpose). `scripts/check_linux.sh` does the whole loop: configure, run
+ctest, collect line coverage with lcov, keep only `src/` (no googletest, tests or tools), fail
+under 85 %, then build the wheel and run pytest:
+
+```bash
+docker run --rm -v "$PWD:/src" -w /src python:3.12 bash scripts/check_linux.sh
+# HTML=1 also writes an lcov HTML report; MIN_COVERAGE=90 changes the gate; SKIP_PYTHON=1 skips pytest
+```
+
+Measured in that container (GCC 12, Ryzen AI 9 HX 370 with AVX-512 + VNNI):
+**`src/` line coverage 90.6 % (1,603 of 1,770 lines), 94.2 % of functions** (it was 89.7 % before
+the gap tests of this phase). The lowest files are `graph.cpp` (83 %, mostly shape-inference error
+branches), `gemm_avx512.cpp` and `gemm_avx2.cpp` (~87 %, edge-tile paths) and `wire.cpp` (86 %).
+The AVX-512 and VNNI kernel files only count when the CPU actually has those instructions, so on
+an older CPU the number is lower (roughly 5 points); that is why the gate is 85 %, not 90 %.
 
 ## Build
 
