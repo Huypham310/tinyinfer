@@ -245,6 +245,33 @@ these. INT8 only beats fp32 on the wide layers: at layer 4 batch 1 it's 2.4x *sl
 the u8 quantize + im2col pass costs more than the VNNI GEMM saves on 4 columns, and end to end
 it's now about as fast as fp32 (eval: 3.56 vs 3.40 ms/image).
 
+## Python
+
+`pip install .` builds the engine as a pybind11 module (scikit-build-core drives CMake with
+`TINYINFER_BUILD_PYTHON=ON`):
+
+```python
+from tinyinfer import Session, cpu_features
+
+s = Session("model.onnx", batch=1)
+print(s.info())            # nodes, BN folded, ReLU fused, peak live MiB, ISA
+out = s.run(images)        # float32 NCHW ndarray -> float32 logits
+
+s.calibrate([images])      # record Conv ranges, switch those nodes to INT8
+out8 = s.run(images)
+```
+
+```text
+$ python -c "..."          # Linux container, same ResNet-18 as above
+fp32 batch1: median 4.50 ms, peak 320 KiB
+int8 batch8: median 41.3 ms (5.16 ms/img)
+```
+
+Crossing the Python boundary costs almost nothing next to the model: 4.50 ms vs 5.12 ms for the
+same batch-1 run through the C++ CLI (noise). Five pytest cases cover the ISA override, a
+Conv+ReLU fixture end to end, input validation, INT8 calibration changing the output a little,
+and the peak-memory counter.
+
 ## Build
 
 Requirements: CMake 3.24+, Ninja, and GCC 12+ or Clang 16+ (MSVC should work but is not the
