@@ -139,3 +139,51 @@ TEST(Quant, CalibratedGraphStaysCloseToFloat) {
         EXPECT_NEAR(a.data<float>()[i], b.data<float>()[i], 0.02F);  // softmax probabilities
     }
 }
+
+TEST(Quant, GroupedConvIsRefused) {
+    // the packed int8 layout has no notion of groups, so it must fail loudly instead of
+    // quantizing a grouped weight as if it were dense
+    const Tensor w = random_tensor(Shape{8, 2, 3, 3}, 21);  // 8 oc, 4 in-channels / 2 groups
+    kernels::Conv2dParams p;
+    p.groups = 2;
+    EXPECT_THROW(quantize_conv(w, nullptr, p, choose_u8(-1.0F, 1.0F)), std::invalid_argument);
+    p.groups = 1;
+    EXPECT_NO_THROW(quantize_conv(w, nullptr, p, choose_u8(-1.0F, 1.0F)));
+}
+
+TEST(Quant, Conv2dInt8RejectsChannelMismatch) {
+    const Tensor w = random_tensor(Shape{4, 3, 3, 3}, 22);
+    const QConv q = quantize_conv(w, nullptr, {}, choose_u8(-1.0F, 1.0F));
+    const Tensor x = random_tensor(Shape{1, 5, 8, 8}, 23);  // 5 channels, weights expect 3
+    EXPECT_THROW(conv2d_int8(x, q), std::invalid_argument);
+}
+
+TEST(Quant, SetInt8IsaRefusesUnknownAndUnsupportedKernels) {
+    const std::string before = int8_isa();
+    // unknown names are refused and leave the active kernel alone
+    EXPECT_FALSE(set_int8_isa("bogus"));
+    EXPECT_FALSE(set_int8_isa(""));
+    EXPECT_FALSE(set_int8_isa("avx2"));  // there is no AVX2 int8 kernel, only vnni / scalar
+    EXPECT_EQ(std::string(int8_isa()), before);
+
+    // scalar always works; vnni only when CPUID has avx512f + bw + vnni
+    EXPECT_TRUE(set_int8_isa("scalar"));
+    EXPECT_EQ(std::string(int8_isa()), "scalar");
+    const auto& f = cpu_features();
+    const bool has_vnni = f.avx512f && f.avx512bw && f.avx512vnni;
+    EXPECT_EQ(set_int8_isa("vnni"), has_vnni);
+    // refuse path: without VNNI we must stay on the scalar kernel
+    if (!has_vnni) EXPECT_EQ(std::string(int8_isa()), "scalar");
+
+    set_int8_isa(before.c_str());  // put the global back for the other tests
+}
+
+TEST(Quant, CalibrationOnlyQuantizesConvNodes) {
+    // conv_bn_head = Conv, GlobalAveragePool, Reshape, Gemm, Softmax: only node 0 gets a plan
+    const auto model = onnx::load_model(std::string(TINYINFER_TEST_DATA_DIR) + "/conv_bn_head.onnx");
+    Graph g(model, {{"x", Shape{2, 3, 16, 16}}});
+    const QuantPlan plan = calibrate(g, "x", {random_tensor(Shape{2, 3, 16, 16}, 31)});
+    ASSERT_EQ(plan.size(), g.nodes().size());
+    EXPECT_TRUE(plan[0].has_value());
+    for (std::size_t i = 1; i < plan.size(); ++i) EXPECT_FALSE(plan[i].has_value()) << "node " << i;
+}

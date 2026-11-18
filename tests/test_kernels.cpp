@@ -195,6 +195,61 @@ TEST(Ops, BatchNormReluAddSoftmax) {
     EXPECT_NEAR(sm.data<float>()[3], 1.0F / 3, 1e-6);
 }
 
+TEST(Ops, ClipClampsBothSides) {
+    const Tensor x = Tensor::from(Shape{2, 3}, std::vector<float>{-5, -1, 0, 0.5F, 6, 100});
+    const Tensor y = clip(x, 0.0F, 6.0F);  // ReLU6, what MobileNet-style models export
+    ASSERT_EQ(y.shape(), x.shape());
+    const std::vector<float> want = {0, 0, 0, 0.5F, 6, 6};
+    for (std::int64_t i = 0; i < y.numel(); ++i) EXPECT_FLOAT_EQ(y.data<float>()[i], want[i]) << i;
+    // the input is not modified (clip returns a new tensor)
+    EXPECT_FLOAT_EQ(x.data<float>()[0], -5.0F);
+    EXPECT_FLOAT_EQ(x.data<float>()[5], 100.0F);
+}
+
+TEST(Ops, ClipWithOneSidedAndWideBounds) {
+    const Tensor x = Tensor::from(Shape{4}, std::vector<float>{-1e30F, -2, 3, 1e30F});
+    // "omitted" bounds are +-FLT_MAX-ish in the graph, so only the other side bites
+    const Tensor lo_only = clip(x, -1.0F, 3.4e38F);
+    EXPECT_FLOAT_EQ(lo_only.data<float>()[0], -1.0F);
+    EXPECT_FLOAT_EQ(lo_only.data<float>()[1], -1.0F);
+    EXPECT_FLOAT_EQ(lo_only.data<float>()[3], 1e30F);
+    const Tensor hi_only = clip(x, -3.4e38F, 1.0F);
+    EXPECT_FLOAT_EQ(hi_only.data<float>()[0], -1e30F);
+    EXPECT_FLOAT_EQ(hi_only.data<float>()[2], 1.0F);
+    // lo == hi pins everything to that value
+    const Tensor pinned = clip(x, 2.0F, 2.0F);
+    for (std::int64_t i = 0; i < pinned.numel(); ++i) EXPECT_FLOAT_EQ(pinned.data<float>()[i], 2.0F);
+}
+
+TEST(Ops, ReluInplaceMatchesReluAndSharesStorage) {
+    const Tensor x = random_tensor(Shape{3, 5, 7}, 41);  // 105 elements: not a multiple of 16
+    const Tensor want = relu(x);
+    // the random input really has negatives, otherwise the test proves nothing
+    bool has_negative = false;
+    for (std::int64_t i = 0; i < x.numel(); ++i) has_negative |= x.data<float>()[i] < 0.0F;
+    EXPECT_TRUE(has_negative);
+
+    Tensor y = x.clone();
+    Tensor alias = y;  // copies share storage, so the in-place result shows through both
+    relu_inplace(y);
+    for (std::int64_t i = 0; i < y.numel(); ++i) {
+        EXPECT_FLOAT_EQ(y.data<float>()[i], want.data<float>()[i]) << i;
+        EXPECT_GE(alias.data<float>()[i], 0.0F);
+    }
+    // clone() is a deep copy, so the original it was made from is still untouched
+    bool still_negative = false;
+    for (std::int64_t i = 0; i < x.numel(); ++i) still_negative |= x.data<float>()[i] < 0.0F;
+    EXPECT_TRUE(still_negative);
+}
+
+TEST(Ops, ReluInplaceHandlesZerosAndTinyValues) {
+    Tensor z = Tensor::from(Shape{4}, std::vector<float>{-0.0F, 0.0F, -1e-20F, 1e-20F});
+    relu_inplace(z);
+    EXPECT_FLOAT_EQ(z.data<float>()[0], 0.0F);
+    EXPECT_FLOAT_EQ(z.data<float>()[2], 0.0F);
+    EXPECT_FLOAT_EQ(z.data<float>()[3], 1e-20F);
+}
+
 TEST(Ops, GemmOpWithBiasAndAlpha) {
     // y = 0.5 * x W^T + b, W stored [out, in] like a Linear layer
     const Tensor x = Tensor::from(Shape{1, 2}, std::vector<float>{1, 2});

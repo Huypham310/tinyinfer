@@ -12,6 +12,20 @@ option(TINYINFER_NATIVE "Compile with -march=native" OFF)
 option(TINYINFER_OPENMP "Multithread GEMM with OpenMP" ON)
 option(TINYINFER_BUILD_BENCH "Build Google Benchmark suite" OFF)
 option(TINYINFER_BUILD_PYTHON "Build the pybind11 module (pip install . sets this)" OFF)
+option(TINYINFER_COVERAGE "Instrument the library and tests for gcov / lcov (GCC or Clang)" OFF)
+
+if(TINYINFER_COVERAGE)
+  if(MSVC)
+    message(FATAL_ERROR "TINYINFER_COVERAGE needs GCC or Clang (gcov-style instrumentation)")
+  endif()
+  # -O0 so every source line really exists in the binary (no inlined / folded lines);
+  # the numbers are about coverage, not speed
+  add_library(tinyinfer_coverage INTERFACE)
+  target_compile_options(tinyinfer_coverage INTERFACE -O0 -g --coverage)
+  target_link_options(tinyinfer_coverage INTERFACE --coverage)
+  # a coverage build is always Debug-ish: don't let the Release default add -O3 after our -O0
+  set(CMAKE_BUILD_TYPE Debug CACHE STRING "" FORCE)
+endif()
 
 if(TINYINFER_BUILD_PYTHON)
   # the static library gets linked into a shared Python module
@@ -61,6 +75,10 @@ if(TINYINFER_OPENMP)
   if(OpenMP_CXX_FOUND)
     target_link_libraries(tinyinfer PUBLIC OpenMP::OpenMP_CXX)
   endif()
+endif()
+if(TINYINFER_COVERAGE)
+  # PUBLIC: the tests, CLI and Python module that link the lib also need --coverage at link time
+  target_link_libraries(tinyinfer PUBLIC tinyinfer_coverage)
 endif()
 if(TINYINFER_NATIVE AND NOT MSVC)
   target_compile_options(tinyinfer PRIVATE -march=native)
