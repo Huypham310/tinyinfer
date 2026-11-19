@@ -215,14 +215,15 @@ void gemm(int m, int n, int k, const float* a, int lda, const float* b, int ldb,
         if (!trans_b) {
             btbuf.resize(static_cast<std::size_t>(n) * k);
             for (int p = 0; p < k; ++p)
-                for (int j = 0; j < n; ++j) btbuf[static_cast<std::size_t>(j) * k + p] = b[p * ldb + j];
+                for (int j = 0; j < n; ++j)
+                    btbuf[static_cast<std::size_t>(j) * k + p] = b[p * ldb + j];
             bt = btbuf.data();
             ldbt = k;
         }
         constexpr int rows_per_task = 16;
         const int tasks = (m + rows_per_task - 1) / rows_per_task;
-        const int team = std::min(tasks, par::team_size(static_cast<double>(m) * n * k,
-                                                           kWorkPerThread));
+        const int team =
+            std::min(tasks, par::team_size(static_cast<double>(m) * n * k, kWorkPerThread));
         (void)team;
 #pragma omp parallel for schedule(dynamic, 1) num_threads(team) if (team > 1)
         for (int t = 0; t < tasks; ++t) {
@@ -244,8 +245,7 @@ void gemm(int m, int n, int k, const float* a, int lda, const float* b, int ldb,
     // parallel and run 3x slower than one thread: 18 k-blocks x 2 barriers x 24 threads.
     // Same idea for the team size: all-or-nothing was wrong too. A batched 64-channel conv has
     // ~8M MACs per step; 24 threads ran it 2x slower than one, 4 threads 1.5x faster.
-    const double work_per_step =
-        static_cast<double>(m) * std::min(n, NC) * std::min(k, KC);
+    const double work_per_step = static_cast<double>(m) * std::min(n, NC) * std::min(k, KC);
     int threads = 1;
     // below ~8M MACs per step even 2 threads lost at batch 1 (5.5 -> 7.7 ms on ResNet-18)
     if (work_per_step >= 4 * kWorkPerThread && (m_blocks > 1 || n >= 2 * kPanelsPerTask * nr)) {
@@ -274,8 +274,8 @@ void gemm(int m, int n, int k, const float* a, int lda, const float* b, int ldb,
                 int groups = 1;
 #ifdef _OPENMP
                 if (m_blocks < omp_get_num_threads()) {
-                    groups = std::max(1, std::min(panels / kPanelsPerTask,
-                                                  omp_get_num_threads() / m_blocks + 1));
+                    groups = std::max(
+                        1, std::min(panels / kPanelsPerTask, omp_get_num_threads() / m_blocks + 1));
                 }
 #endif
                 const int panels_per_group = (panels + groups - 1) / groups;

@@ -245,7 +245,8 @@ void Graph::topo_sort() {
         }
     }
     nodes_ = std::move(order);
-    for (std::size_t i = 0; i < nodes_.size(); ++i) values_[nodes_[i].output].producer = static_cast<int>(i);
+    for (std::size_t i = 0; i < nodes_.size(); ++i)
+        values_[nodes_[i].output].producer = static_cast<int>(i);
 }
 
 void Graph::infer_shapes() {
@@ -256,12 +257,12 @@ void Graph::infer_shapes() {
             case OpKind::Conv: {
                 const Shape &x = in(0), &w = in(1);
                 if (x.rank() != 4 || w.rank() != 4) throw GraphError(n.name + ": Conv needs NCHW");
-                const int oh = kernels::conv_out_size(static_cast<int>(x[2]), static_cast<int>(w[2]),
-                                                      n.conv.stride[0], n.conv.pads[0],
-                                                      n.conv.pads[2], n.conv.dilation[0]);
-                const int ow = kernels::conv_out_size(static_cast<int>(x[3]), static_cast<int>(w[3]),
-                                                      n.conv.stride[1], n.conv.pads[1],
-                                                      n.conv.pads[3], n.conv.dilation[1]);
+                const int oh = kernels::conv_out_size(
+                    static_cast<int>(x[2]), static_cast<int>(w[2]), n.conv.stride[0],
+                    n.conv.pads[0], n.conv.pads[2], n.conv.dilation[0]);
+                const int ow = kernels::conv_out_size(
+                    static_cast<int>(x[3]), static_cast<int>(w[3]), n.conv.stride[1],
+                    n.conv.pads[1], n.conv.pads[3], n.conv.dilation[1]);
                 if (x[1] != w[1] * n.conv.groups) {
                     throw GraphError(n.name + ": input has " + std::to_string(x[1]) +
                                      " channels, weight expects " +
@@ -279,7 +280,8 @@ void Graph::infer_shapes() {
             case OpKind::Softmax: {
                 const auto rank = static_cast<int>(in(0).rank());
                 const int axis = static_cast<int>(n.alpha);
-                if (axis != -1 && axis != rank - 1) throw GraphError(n.name + ": Softmax not on the last axis");
+                if (axis != -1 && axis != rank - 1)
+                    throw GraphError(n.name + ": Softmax not on the last axis");
                 out = in(0);
                 break;
             }
@@ -292,11 +294,12 @@ void Graph::infer_shapes() {
                 break;
             case OpKind::MaxPool: {
                 const Shape& x = in(0);
-                out = Shape{x[0], x[1],
-                            kernels::conv_out_size(static_cast<int>(x[2]), n.pool.kernel[0],
-                                                   n.pool.stride[0], n.pool.pads[0], n.pool.pads[2], 1),
-                            kernels::conv_out_size(static_cast<int>(x[3]), n.pool.kernel[1],
-                                                   n.pool.stride[1], n.pool.pads[1], n.pool.pads[3], 1)};
+                out = Shape{
+                    x[0], x[1],
+                    kernels::conv_out_size(static_cast<int>(x[2]), n.pool.kernel[0],
+                                           n.pool.stride[0], n.pool.pads[0], n.pool.pads[2], 1),
+                    kernels::conv_out_size(static_cast<int>(x[3]), n.pool.kernel[1],
+                                           n.pool.stride[1], n.pool.pads[1], n.pool.pads[3], 1)};
                 break;
             }
             case OpKind::GlobalAveragePool:
@@ -319,19 +322,23 @@ void Graph::infer_shapes() {
                     dims.push_back(d);
                 }
                 if (infer >= 0) {
-                    if (known == 0 || x.numel() % known != 0) throw GraphError(n.name + ": bad Reshape");
+                    if (known == 0 || x.numel() % known != 0)
+                        throw GraphError(n.name + ": bad Reshape");
                     dims[infer] = x.numel() / known;
                 }
                 out = Shape(dims);
-                if (out.numel() != x.numel()) throw GraphError(n.name + ": Reshape changes the size");
+                if (out.numel() != x.numel())
+                    throw GraphError(n.name + ": Reshape changes the size");
                 break;
             }
             case OpKind::Gemm: {
                 const Shape &a = in(0), &b = in(1);
-                if (a.rank() != 2 || b.rank() != 2) throw GraphError(n.name + ": Gemm needs 2-D inputs");
+                if (a.rank() != 2 || b.rank() != 2)
+                    throw GraphError(n.name + ": Gemm needs 2-D inputs");
                 const auto k = n.trans_b ? b[1] : b[0];
-                if (a[1] != k) throw GraphError(n.name + ": Gemm inner dims " + std::to_string(a[1]) +
-                                                " vs " + std::to_string(k));
+                if (a[1] != k)
+                    throw GraphError(n.name + ": Gemm inner dims " + std::to_string(a[1]) + " vs " +
+                                     std::to_string(k));
                 out = Shape{a[0], n.trans_b ? b[0] : b[1]};
                 break;
             }
@@ -367,7 +374,8 @@ void Graph::fold_batch_norm() {
         const int x = bn.inputs[0];
         const int p = values_[x].producer;
         bool params_const = bn.inputs.size() >= 5;
-        for (std::size_t i = 1; params_const && i < 5; ++i) params_const = values_[bn.inputs[i]].constant;
+        for (std::size_t i = 1; params_const && i < 5; ++i)
+            params_const = values_[bn.inputs[i]].constant;
         if (p < 0 || nodes_[p].kind != OpKind::Conv || uses[x] != 1 || !params_const) continue;
         GraphNode& conv = nodes_[p];
         const Tensor& w = values_[conv.inputs[1]].data;
@@ -429,7 +437,8 @@ void Graph::compact() {
     for (auto& v : values_) {
         if (!v.constant) v.producer = -1;
     }
-    for (std::size_t i = 0; i < nodes_.size(); ++i) values_[nodes_[i].output].producer = static_cast<int>(i);
+    for (std::size_t i = 0; i < nodes_.size(); ++i)
+        values_[nodes_[i].output].producer = static_cast<int>(i);
 }
 
 void Graph::liveness() {
@@ -452,7 +461,8 @@ void Graph::liveness() {
         live += out;
         stats_.peak_live_bytes = std::max(stats_.peak_live_bytes, live);
         for (int in : n.inputs) {
-            if (in < 0 || values_[in].constant || values_[in].last_use != static_cast<int>(i)) continue;
+            if (in < 0 || values_[in].constant || values_[in].last_use != static_cast<int>(i))
+                continue;
             const int p = values_[in].producer;
             if (p >= 0 && nodes_[p].kind == OpKind::Reshape) continue;  // a view, owns nothing
             live -= bytes_of(values_[in].shape);

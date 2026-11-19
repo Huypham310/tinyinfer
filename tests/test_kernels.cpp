@@ -41,17 +41,19 @@ TEST_P(GemmSizes, BlockedMatchesNaive) {
     const auto [m, n, k] = GetParam();
     const std::string original = gemm_isa();
     for (const char* isa : {"scalar", "avx2", "avx512"}) {
-    if (!set_gemm_isa(isa)) continue;  // CPU doesn't have it
-    for (bool trans_b : {false, true}) {
-        const Tensor a = random_tensor(Shape{m, k}, 1);
-        const Tensor b = trans_b ? random_tensor(Shape{n, k}, 2) : random_tensor(Shape{k, n}, 2);
-        const int ldb = trans_b ? k : n;
-        Tensor want(Shape{m, n}, DType::Float32), got(Shape{m, n}, DType::Float32);
-        gemm_naive(m, n, k, a.data<float>(), k, b.data<float>(), ldb, trans_b, want.data<float>(), n);
-        gemm(m, n, k, a.data<float>(), k, b.data<float>(), ldb, trans_b, got.data<float>(), n);
-        // float accumulation vs the double reference: error grows like sqrt(k) * eps
-        expect_close(got, want, 1e-5F * static_cast<float>(std::sqrt(k) + 1) * 4);
-    }
+        if (!set_gemm_isa(isa)) continue;  // CPU doesn't have it
+        for (bool trans_b : {false, true}) {
+            const Tensor a = random_tensor(Shape{m, k}, 1);
+            const Tensor b =
+                trans_b ? random_tensor(Shape{n, k}, 2) : random_tensor(Shape{k, n}, 2);
+            const int ldb = trans_b ? k : n;
+            Tensor want(Shape{m, n}, DType::Float32), got(Shape{m, n}, DType::Float32);
+            gemm_naive(m, n, k, a.data<float>(), k, b.data<float>(), ldb, trans_b,
+                       want.data<float>(), n);
+            gemm(m, n, k, a.data<float>(), k, b.data<float>(), ldb, trans_b, got.data<float>(), n);
+            // float accumulation vs the double reference: error grows like sqrt(k) * eps
+            expect_close(got, want, 1e-5F * static_cast<float>(std::sqrt(k) + 1) * 4);
+        }
     }
     set_gemm_isa(original.c_str());
 }
@@ -69,17 +71,18 @@ TEST(Gemm, IsaSelection) {
     set_gemm_isa(original.c_str());
 }
 
-INSTANTIATE_TEST_SUITE_P(Kernels, GemmSizes,
-                         ::testing::Values(std::make_tuple(1, 1, 1), std::make_tuple(3, 5, 7),
-                                           std::make_tuple(4, 16, 256), std::make_tuple(5, 17, 257),
-                                           std::make_tuple(64, 64, 64), std::make_tuple(65, 513, 300),
-                                           std::make_tuple(130, 40, 600), std::make_tuple(7, 1000, 3),
-                                           // n <= 32 goes through the skinny kernel: column
-                                           // groups, row tails and k tails, plus 33 (packed again)
-                                           std::make_tuple(512, 4, 4608), std::make_tuple(96, 3, 70),
-                                           std::make_tuple(6, 16, 33), std::make_tuple(9, 15, 17),
-                                           std::make_tuple(33, 17, 31), std::make_tuple(258, 7, 1),
-                                           std::make_tuple(20, 32, 45), std::make_tuple(21, 33, 45)));
+INSTANTIATE_TEST_SUITE_P(
+    Kernels, GemmSizes,
+    ::testing::Values(std::make_tuple(1, 1, 1), std::make_tuple(3, 5, 7),
+                      std::make_tuple(4, 16, 256), std::make_tuple(5, 17, 257),
+                      std::make_tuple(64, 64, 64), std::make_tuple(65, 513, 300),
+                      std::make_tuple(130, 40, 600), std::make_tuple(7, 1000, 3),
+                      // n <= 32 goes through the skinny kernel: column
+                      // groups, row tails and k tails, plus 33 (packed again)
+                      std::make_tuple(512, 4, 4608), std::make_tuple(96, 3, 70),
+                      std::make_tuple(6, 16, 33), std::make_tuple(9, 15, 17),
+                      std::make_tuple(33, 17, 31), std::make_tuple(258, 7, 1),
+                      std::make_tuple(20, 32, 45), std::make_tuple(21, 33, 45)));
 
 TEST(Gemm, SkinnyRespectsLeadingDims) {
     // A and C as sub-blocks of wider matrices: the skinny kernel must step by lda / ldc, not k / n
@@ -95,8 +98,10 @@ TEST(Gemm, SkinnyRespectsLeadingDims) {
         for (int i = 0; i < m; ++i) {
             for (int j = 0; j < ldc; ++j) {
                 // columns past n belong to someone else and must stay untouched
-                if (j >= n) EXPECT_EQ(got[i * ldc + j], 7.0F) << isa;
-                else EXPECT_NEAR(got[i * ldc + j], want[i * ldc + j], 1e-4F) << isa;
+                if (j >= n)
+                    EXPECT_EQ(got[i * ldc + j], 7.0F) << isa;
+                else
+                    EXPECT_NEAR(got[i * ldc + j], want[i * ldc + j], 1e-4F) << isa;
             }
         }
     }
@@ -218,7 +223,8 @@ TEST(Ops, ClipWithOneSidedAndWideBounds) {
     EXPECT_FLOAT_EQ(hi_only.data<float>()[2], 1.0F);
     // lo == hi pins everything to that value
     const Tensor pinned = clip(x, 2.0F, 2.0F);
-    for (std::int64_t i = 0; i < pinned.numel(); ++i) EXPECT_FLOAT_EQ(pinned.data<float>()[i], 2.0F);
+    for (std::int64_t i = 0; i < pinned.numel(); ++i)
+        EXPECT_FLOAT_EQ(pinned.data<float>()[i], 2.0F);
 }
 
 TEST(Ops, ReluInplaceMatchesReluAndSharesStorage) {

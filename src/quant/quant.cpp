@@ -37,7 +37,8 @@ void gemm_s8u8_ref(int m, int n, int k, const std::int8_t* a, const std::uint8_t
     for (int i = 0; i < m; ++i)
         for (int j = 0; j < n; ++j) {
             std::int32_t acc = 0;
-            for (int p = 0; p < k; ++p) acc += static_cast<std::int32_t>(a[i * k + p]) * b[p * n + j];
+            for (int p = 0; p < k; ++p)
+                acc += static_cast<std::int32_t>(a[i * k + p]) * b[p * n + j];
             c[i * n + j] = acc;
         }
 }
@@ -113,9 +114,7 @@ void gemm_packed(const QConv& q, const std::uint8_t* b, int n, std::int32_t* c) 
 
 }  // namespace
 
-const char* int8_isa() {
-    return active().load() == detail::kernel_scalar_8x32 ? "scalar" : "vnni";
-}
+const char* int8_isa() { return active().load() == detail::kernel_scalar_8x32 ? "scalar" : "vnni"; }
 
 bool set_int8_isa(const char* isa) {
     if (std::strcmp(isa, "scalar") == 0) {
@@ -156,8 +155,8 @@ QConv quantize_conv(const Tensor& w, const Tensor* bias, const kernels::Conv2dPa
         const float s = amax > 0 ? amax / 127.0F : 1.0F;
         q.w_scale[o] = s;
         for (int j = 0; j < q.k; ++j) {
-            const auto v = static_cast<std::int8_t>(
-                std::clamp(std::lround(wd[o * q.k + j] / s), -127L, 127L));
+            const auto v =
+                static_cast<std::int8_t>(std::clamp(std::lround(wd[o * q.k + j] / s), -127L, 127L));
             wq[static_cast<std::size_t>(o) * q.k + j] = v;
             q.w_sum[o] += v;
         }
@@ -184,8 +183,10 @@ Tensor conv2d_int8(const Tensor& x, const QConv& q) {
     const int n = static_cast<int>(x.shape()[0]), c = static_cast<int>(x.shape()[1]);
     const int h = static_cast<int>(x.shape()[2]), w = static_cast<int>(x.shape()[3]);
     if (c != q.ic) throw std::invalid_argument("conv2d_int8: channel mismatch");
-    const int oh = kernels::conv_out_size(h, q.kh, p.stride[0], p.pads[0], p.pads[2], p.dilation[0]);
-    const int ow = kernels::conv_out_size(w, q.kw, p.stride[1], p.pads[1], p.pads[3], p.dilation[1]);
+    const int oh =
+        kernels::conv_out_size(h, q.kh, p.stride[0], p.pads[0], p.pads[2], p.dilation[0]);
+    const int ow =
+        kernels::conv_out_size(w, q.kw, p.stride[1], p.pads[1], p.pads[3], p.dilation[1]);
     const int pixels = oh * ow;
     const auto pad = static_cast<std::uint8_t>(q.input.zero_point);  // the uint8 that means 0.0
 
@@ -243,10 +244,10 @@ Tensor conv2d_int8(const Tensor& x, const QConv& q) {
             const std::int32_t corr = q.input.zero_point * q.w_sum[o];
             const float b = q.bias.empty() ? 0.0F : q.bias[o];
             for (int i = 0; i < cnt; ++i) {
-                const std::int32_t* a =
-                    acc.data() + static_cast<std::size_t>(o) * ld + static_cast<std::size_t>(i) * pixels;
-                float* ys = y.data<float>() +
-                            (static_cast<std::size_t>(n0 + i) * q.oc + o) * pixels;
+                const std::int32_t* a = acc.data() + static_cast<std::size_t>(o) * ld +
+                                        static_cast<std::size_t>(i) * pixels;
+                float* ys =
+                    y.data<float>() + (static_cast<std::size_t>(n0 + i) * q.oc + o) * pixels;
                 for (int j = 0; j < pixels; ++j) ys[j] = static_cast<float>(a[j] - corr) * s + b;
             }
         }
@@ -257,8 +258,8 @@ Tensor conv2d_int8(const Tensor& x, const QConv& q) {
 QuantPlan calibrate(const Graph& g, const std::string& input_name,
                     const std::vector<Tensor>& batches) {
     const auto& nodes = g.nodes();
-    std::vector<std::pair<float, float>> ranges(nodes.size(), {std::numeric_limits<float>::max(),
-                                                               std::numeric_limits<float>::lowest()});
+    std::vector<std::pair<float, float>> ranges(
+        nodes.size(), {std::numeric_limits<float>::max(), std::numeric_limits<float>::lowest()});
     Executor ex(g);
     ex.observe_conv_inputs(&ranges);
     for (const Tensor& b : batches) ex.run({{input_name, b}});
@@ -269,7 +270,8 @@ QuantPlan calibrate(const Graph& g, const std::string& input_name,
         if (n.kind != OpKind::Conv || n.conv.groups != 1) continue;
         const auto& v = g.values();
         const Tensor& w = v[n.inputs[1]].data;
-        const Tensor* bias = n.inputs.size() > 2 && n.inputs[2] >= 0 ? &v[n.inputs[2]].data : nullptr;
+        const Tensor* bias =
+            n.inputs.size() > 2 && n.inputs[2] >= 0 ? &v[n.inputs[2]].data : nullptr;
         plan[i] = quantize_conv(w, bias, n.conv, choose_u8(ranges[i].first, ranges[i].second));
     }
     return plan;

@@ -130,8 +130,7 @@ const int kRegistered = [] {
         ->Unit(benchmark::kMicrosecond);
     for (const Layer& l : kLayers) {
         for (bool int8 : {false, true}) {
-            const std::string name =
-                std::string("BM_Conv/") + l.name + (int8 ? "/int8" : "/fp32");
+            const std::string name = std::string("BM_Conv/") + l.name + (int8 ? "/int8" : "/fp32");
             benchmark::RegisterBenchmark(name.c_str(), BM_Conv, l, int8)
                 ->Arg(1)
                 ->Arg(32)

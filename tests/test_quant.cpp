@@ -123,12 +123,13 @@ TEST(Quant, VnniKernelIsBitExactAgainstTheReference) {
 }
 
 TEST(Quant, CalibratedGraphStaysCloseToFloat) {
-    const auto model = onnx::load_model(std::string(TINYINFER_TEST_DATA_DIR) + "/conv_bn_head.onnx");
+    const auto model =
+        onnx::load_model(std::string(TINYINFER_TEST_DATA_DIR) + "/conv_bn_head.onnx");
     Graph g(model, {{"x", Shape{4, 3, 16, 16}}});
     std::vector<Tensor> calib = {random_tensor(Shape{4, 3, 16, 16}, 11, -2.0F, 2.0F),
                                  random_tensor(Shape{4, 3, 16, 16}, 12, -2.0F, 2.0F)};
     const QuantPlan plan = calibrate(g, "x", calib);
-    ASSERT_TRUE(plan[0].has_value());  // the folded Conv(+BN+Relu) got quantized
+    ASSERT_TRUE(plan[0].has_value());         // the folded Conv(+BN+Relu) got quantized
     EXPECT_GT(plan[0]->input.zero_point, 0);  // its input (the image) is signed
 
     const Tensor x = random_tensor(Shape{4, 3, 16, 16}, 13, -2.0F, 2.0F);
@@ -180,7 +181,8 @@ TEST(Quant, SetInt8IsaRefusesUnknownAndUnsupportedKernels) {
 
 TEST(Quant, CalibrationOnlyQuantizesConvNodes) {
     // conv_bn_head = Conv, GlobalAveragePool, Reshape, Gemm, Softmax: only node 0 gets a plan
-    const auto model = onnx::load_model(std::string(TINYINFER_TEST_DATA_DIR) + "/conv_bn_head.onnx");
+    const auto model =
+        onnx::load_model(std::string(TINYINFER_TEST_DATA_DIR) + "/conv_bn_head.onnx");
     Graph g(model, {{"x", Shape{2, 3, 16, 16}}});
     const QuantPlan plan = calibrate(g, "x", {random_tensor(Shape{2, 3, 16, 16}, 31)});
     ASSERT_EQ(plan.size(), g.nodes().size());

@@ -66,7 +66,8 @@ Tensor batch_norm(const Tensor& x, const Tensor& scale, const Tensor& bias, cons
     const auto n = x.shape()[0], c = x.shape()[1];
     const auto pixels = x.shape()[2] * x.shape()[3];
     for (const Tensor* t : {&scale, &bias, &mean, &var}) {
-        if (t->numel() != c) throw std::invalid_argument("batch_norm: parameters must have C values");
+        if (t->numel() != c)
+            throw std::invalid_argument("batch_norm: parameters must have C values");
     }
     Tensor y(x.shape(), DType::Float32);
     const float* xd = x.data<float>();

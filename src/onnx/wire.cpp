@@ -7,8 +7,7 @@ namespace tinyinfer::onnx {
 void WireReader::need(std::size_t n) const {
     if (static_cast<std::size_t>(end_ - pos_) < n) {
         throw ParseError("truncated protobuf: need " + std::to_string(n) + " bytes at offset " +
-                         std::to_string(offset()) + ", have " +
-                         std::to_string(end_ - pos_));
+                         std::to_string(offset()) + ", have " + std::to_string(end_ - pos_));
     }
 }
 
