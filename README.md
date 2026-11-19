@@ -328,6 +328,39 @@ The `bench` preset builds the Google Benchmark suite (`build/bench/bench/tinyinf
 `TINYINFER_RESNET18` to the model for the end-to-end cases). Threads default to one per physical
 core; `TINYINFER_THREADS=N` changes that (e.g. 24 to reproduce the `bench-gemm` scaling table).
 
+## CI and Docker
+
+GitHub Actions (`.github/workflows/ci.yml`, free `ubuntu-24.04` runners only) runs on every pull
+request and on pushes to `main`:
+
+| job | what it does |
+|---|---|
+| `format` | `clang-format --dry-run -Werror` over every tracked `.cpp` / `.hpp` (clang-format 18.1.8 from pip, pinned so the result doesn't depend on the runner image) |
+| `cpp-test (release)` | `cmake --preset release`, build, `ctest --preset release`, then `tinyinfer --info` as a smoke test |
+| `python-test` | `pip install .` (scikit-build-core builds the pybind11 module) and `pytest`, on Python 3.10 and 3.12 |
+| `coverage (docker)` | builds the `Dockerfile` and runs it: coverage build, ctest, lcov gate (85 % of `src/` lines), pytest |
+
+The models that need external files (`TINYINFER_RESNET18`, `TINYINFER_RESNET18_REF`) are not
+available on the runners, so those tests and benchmarks are skipped there.
+
+The `Dockerfile` (`python:3.12-bookworm` + CMake, Ninja, lcov; GCC 12 comes with the image) is a
+throwaway build / check environment, not a runtime image. Its default command is
+`scripts/check_linux.sh`:
+
+```bash
+docker build -t tinyinfer .
+docker run --rm tinyinfer                        # coverage gate + pytest
+docker run --rm -e MIN_COVERAGE=90 tinyinfer     # stricter gate
+docker run --rm -e SKIP_PYTHON=1 tinyinfer       # C++ only
+```
+
+To run the formatting check locally the same way CI does:
+
+```bash
+pip install clang-format==18.1.8
+git ls-files '*.cpp' '*.hpp' '*.h' | xargs clang-format --dry-run -Werror   # add -i to fix in place
+```
+
 ## License
 
 MIT
