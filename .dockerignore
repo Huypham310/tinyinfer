@@ -1,0 +1,22 @@
+.git
+.github
+.pytest_cache
+.cache
+.vscode
+.idea
+
+# build output from the host (Windows paths in CMakeCache would break the container build)
+build/
+out/
+compile_commands.json
+CMakeUserPresets.json
+
+# local models and benchmark output
+models/*.onnx
+bench/results/
+
+# python junk
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
