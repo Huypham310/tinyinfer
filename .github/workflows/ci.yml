@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# a new push to the same branch cancels the older run
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  format:
+    name: format
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # pinned: clang-format output changes between majors, and the apt version drifts with the runner image
+      - name: Install clang-format
+        run: pip install clang-format==18.1.8
+      - name: Check formatting
+        run: |
+          git ls-files '*.cpp' '*.hpp' '*.h' | xargs clang-format --dry-run -Werror
+
+  cpp-test:
+    name: cpp-test (release)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install tools
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ninja-build
+      - name: Configure
+        run: cmake --preset release
+      - name: Build
+        run: cmake --build --preset release
+      # TINYINFER_RESNET18* are not set here, so the model-dependent tests are skipped
+      - name: ctest
+        run: ctest --preset release
+      - name: CLI smoke test
+        run: ./build/release/tinyinfer --info
+
+  python-test:
+    name: python-test
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install tools
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ninja-build
+      # builds the pybind11 module through scikit-build-core, same as a user's `pip install .`
+      - name: Build and install
+        run: pip install . pytest
+      - name: pytest
+        run: python -m pytest -q
+
+  coverage:
+    name: coverage (docker)
+    runs-on: ubuntu-24.04
+    needs: [cpp-test]
+    steps:
+      - uses: actions/checkout@v4
+      # the runner CPU may lack AVX-512, which is why the gate in check_linux.sh is 85 and not 90
+      - name: Build image
+        run: docker build -t tinyinfer .
+      - name: Coverage gate + pytest
+        run: docker run --rm tinyinfer
