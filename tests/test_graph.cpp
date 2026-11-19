@@ -122,8 +122,8 @@ std::string chain_model(bool shuffled, const char* last_op = "Relu") {
 
 TEST(Graph, TopologicalSortFixesNodeOrder) {
     const std::string bytes = chain_model(true);
-    const auto model = onnx::parse_model(reinterpret_cast<const std::uint8_t*>(bytes.data()),
-                                         bytes.size());
+    const auto model =
+        onnx::parse_model(reinterpret_cast<const std::uint8_t*>(bytes.data()), bytes.size());
     Graph g(model, {});
     ASSERT_EQ(g.nodes().size(), 3u);
     EXPECT_EQ(g.values()[g.nodes()[0].inputs[0]].name, "x");
@@ -137,8 +137,8 @@ TEST(Graph, TopologicalSortFixesNodeOrder) {
 
 TEST(Graph, UnsupportedOpsFailAtLoadTime) {
     const std::string bytes = chain_model(false, "LSTM");
-    const auto model = onnx::parse_model(reinterpret_cast<const std::uint8_t*>(bytes.data()),
-                                         bytes.size());
+    const auto model =
+        onnx::parse_model(reinterpret_cast<const std::uint8_t*>(bytes.data()), bytes.size());
     try {
         Graph g(model, {});
         FAIL() << "expected GraphError";
@@ -172,8 +172,10 @@ std::string one_op_model(const char* op, const char* attr = nullptr, std::int64_
     if (attr != nullptr) {
         Writer a;
         a.bytes_field(1, attr);
-        if (ints_attr) a.int_field(8, attr_value).int_field(20, 7);  // INTS
-        else a.int_field(3, attr_value).int_field(20, 2);            // INT
+        if (ints_attr)
+            a.int_field(8, attr_value).int_field(20, 7);  // INTS
+        else
+            a.int_field(3, attr_value).int_field(20, 2);  // INT
         node.message(5, a);
     }
     if (domain != nullptr) node.bytes_field(7, domain);
@@ -221,7 +223,8 @@ TEST(Graph, ExecutorProfilingRecordsOneTimePerNode) {
     Graph g(model, {{"x", Shape{2, 3, 16, 16}}});
     Tensor x2(Shape{2, 3, 16, 16}, DType::Float32);
     for (std::int64_t i = 0; i < x2.numel(); ++i) {
-        x2.data<float>()[i] = std::sin(0.01F * static_cast<float>(i));  // deterministic, non-trivial
+        x2.data<float>()[i] =
+            std::sin(0.01F * static_cast<float>(i));  // deterministic, non-trivial
     }
 
     Executor ex(g);

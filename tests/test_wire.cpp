@@ -11,8 +11,8 @@ using tinyinfer::onnx::WireReader;
 using tinyinfer::onnx::WireType;
 
 TEST(Wire, VarintsRoundTrip) {
-    const std::uint64_t values[] = {0,   1,       127, 128, 300, 16384, 0xFFFFFFFFull,
-                                     std::numeric_limits<std::uint64_t>::max()};
+    const std::uint64_t values[] = {
+        0, 1, 127, 128, 300, 16384, 0xFFFFFFFFull, std::numeric_limits<std::uint64_t>::max()};
     for (auto v : values) {
         test_proto::Writer w;
         w.varint(v);

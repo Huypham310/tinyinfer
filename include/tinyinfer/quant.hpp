@@ -39,8 +39,8 @@ void gemm_s8u8_ref(int m, int n, int k, const std::int8_t* a, const std::uint8_t
 /// Weights of one conv, quantized and pre-packed for the int8 GEMM (done once, at load time).
 struct QConv {
     int oc = 0, ic = 0, kh = 0, kw = 0;
-    int k = 0;       // ic * kh * kw
-    int kpad = 0;    // k rounded up to a multiple of 4 (vpdpbusd works on groups of 4)
+    int k = 0;     // ic * kh * kw
+    int kpad = 0;  // k rounded up to a multiple of 4 (vpdpbusd works on groups of 4)
     std::vector<std::int8_t> w_packed;  // MR-row panels, k in groups of 4, zero-padded
     std::vector<float> w_scale;         // per output channel
     std::vector<std::int32_t> w_sum;    // sum over k of the int8 weights, for the zero point

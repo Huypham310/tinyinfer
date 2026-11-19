@@ -42,7 +42,7 @@ struct Attribute {
 struct Node {
     std::string name;
     std::string op_type;
-    std::string domain;  // "" = the default ai.onnx domain
+    std::string domain;               // "" = the default ai.onnx domain
     std::vector<std::string> inputs;  // "" marks an omitted optional input
     std::vector<std::string> outputs;
     std::vector<Attribute> attributes;

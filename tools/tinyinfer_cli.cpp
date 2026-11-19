@@ -64,16 +64,15 @@ int inspect(const char* path, bool list_nodes) {
         return 1;
     }
     const double ms =
-        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start)
-            .count();
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
 
     const auto& g = m.graph;
     std::cout << "model:   ir " << m.ir_version << ", opset " << m.opset() << ", producer "
               << (m.producer_name.empty() ? "?" : m.producer_name) << ' ' << m.producer_version
               << '\n';
     std::cout << "graph:   " << (g.name.empty() ? "(unnamed)" : g.name) << ", " << g.nodes.size()
-              << " nodes, " << g.initializers.size() << " initializers, "
-              << g.parameter_count() << " params (" << std::fixed << std::setprecision(1)
+              << " nodes, " << g.initializers.size() << " initializers, " << g.parameter_count()
+              << " params (" << std::fixed << std::setprecision(1)
               << static_cast<double>(g.parameter_bytes()) / (1024.0 * 1024.0) << " MiB)\n";
     for (const auto* in : g.runtime_inputs()) {
         std::cout << "input:   " << in->name << ' ' << elem_type_name(in->elem_type) << ' '
@@ -115,8 +114,8 @@ double gflops(int n, int reps, F&& run) {
     for (int r = 0; r < reps; ++r) {
         const auto t0 = std::chrono::steady_clock::now();
         run();
-        best = std::min(best, std::chrono::duration<double>(std::chrono::steady_clock::now() - t0)
-                                  .count());
+        best = std::min(
+            best, std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
     }
     return 2.0 * n * n * n / best / 1e9;
 }
@@ -154,9 +153,8 @@ int bench_gemm() {
                 std::cout << std::setw(9) << "n/a";
                 continue;
             }
-            last = gflops(n, n >= 2048 ? 2 : 5, [&] {
-                k::gemm(n, n, n, a.data(), n, b.data(), n, false, c.data(), n);
-            });
+            last = gflops(n, n >= 2048 ? 2 : 5,
+                          [&] { k::gemm(n, n, n, a.data(), n, b.data(), n, false, c.data(), n); });
             std::cout << std::setw(9) << last;
         }
         std::cout << std::setw(14) << (peak512 > 0 ? 100.0 * last / peak512 : 0.0) << "%\n";
@@ -171,12 +169,11 @@ int bench_gemm() {
     double one = 0.0;
     for (int threads : {1, 2, 4, 8, 12, 24}) {
         omp_set_num_threads(threads);
-        const double g = gflops(n, 3, [&] {
-            k::gemm(n, n, n, a.data(), n, b.data(), n, false, c.data(), n);
-        });
+        const double g =
+            gflops(n, 3, [&] { k::gemm(n, n, n, a.data(), n, b.data(), n, false, c.data(), n); });
         if (threads == 1) one = g;
-        std::cout << std::setw(4) << threads << " threads: " << std::setw(7) << g
-                  << " GFLOP/s  (" << std::setprecision(1) << g / one << "x)\n";
+        std::cout << std::setw(4) << threads << " threads: " << std::setw(7) << g << " GFLOP/s  ("
+                  << std::setprecision(1) << g / one << "x)\n";
     }
     omp_set_num_threads(omp_get_num_procs());
 #endif
@@ -190,9 +187,12 @@ int run_model(int argc, char** argv) {
     int batch = 1, iters = 50;
     std::string ref;
     for (int i = 3; i + 1 < argc; i += 2) {
-        if (std::strcmp(argv[i], "--batch") == 0) batch = std::atoi(argv[i + 1]);
-        else if (std::strcmp(argv[i], "--iters") == 0) iters = std::atoi(argv[i + 1]);
-        else if (std::strcmp(argv[i], "--ref") == 0) ref = argv[i + 1];
+        if (std::strcmp(argv[i], "--batch") == 0)
+            batch = std::atoi(argv[i + 1]);
+        else if (std::strcmp(argv[i], "--iters") == 0)
+            iters = std::atoi(argv[i + 1]);
+        else if (std::strcmp(argv[i], "--ref") == 0)
+            ref = argv[i + 1];
     }
     try {
         const ox::Model m = ox::load_model(path);
@@ -206,9 +206,11 @@ int run_model(int argc, char** argv) {
         tinyinfer::Tensor x(shape, tinyinfer::DType::Float32);
         if (!ref.empty()) {
             std::ifstream f(ref + ".input.bin", std::ios::binary);
-            f.read(reinterpret_cast<char*>(x.data<float>()), static_cast<std::streamsize>(x.nbytes()));
+            f.read(reinterpret_cast<char*>(x.data<float>()),
+                   static_cast<std::streamsize>(x.nbytes()));
         } else {
-            for (std::int64_t i = 0; i < x.numel(); ++i) x.data<float>()[i] = static_cast<float>(i % 17) * 0.05F;
+            for (std::int64_t i = 0; i < x.numel(); ++i)
+                x.data<float>()[i] = static_cast<float>(i % 17) * 0.05F;
         }
         tinyinfer::Executor ex(g);
         std::vector<tinyinfer::Tensor> out;
@@ -217,7 +219,9 @@ int run_model(int argc, char** argv) {
         for (int i = 0; i < iters; ++i) {
             const auto t0 = std::chrono::steady_clock::now();
             out = ex.run({{in->name, x}});
-            ms.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+            ms.push_back(
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0)
+                    .count());
         }
         std::sort(ms.begin(), ms.end());
         const auto& s = g.stats();
@@ -228,7 +232,8 @@ int run_model(int argc, char** argv) {
                   << "\nlatency: median " << ms[ms.size() / 2] << " ms, min " << ms.front()
                   << " ms over " << iters << " runs\n"
                   << "activations: " << static_cast<double>(s.activation_bytes) / 1048576.0
-                  << " MiB if all kept, peak " << static_cast<double>(ex.last_peak_bytes()) / 1048576.0
+                  << " MiB if all kept, peak "
+                  << static_cast<double>(ex.last_peak_bytes()) / 1048576.0
                   << " MiB with liveness\n";
         if (std::getenv("TINYINFER_PROFILE") != nullptr) {
             ex.set_profiling(true);
@@ -243,12 +248,14 @@ int run_model(int argc, char** argv) {
         if (!ref.empty()) {
             tinyinfer::Tensor want(out[0].shape(), tinyinfer::DType::Float32);
             std::ifstream f(ref + ".output.bin", std::ios::binary);
-            f.read(reinterpret_cast<char*>(want.data<float>()), static_cast<std::streamsize>(want.nbytes()));
+            f.read(reinterpret_cast<char*>(want.data<float>()),
+                   static_cast<std::streamsize>(want.nbytes()));
             float worst = 0.0F;
             for (std::int64_t i = 0; i < want.numel(); ++i) {
                 worst = std::max(worst, std::abs(want.data<float>()[i] - out[0].data<float>()[i]));
             }
-            std::cout << std::scientific << std::setprecision(2) << "max |diff| vs reference: " << worst << "\n";
+            std::cout << std::scientific << std::setprecision(2)
+                      << "max |diff| vs reference: " << worst << "\n";
         }
     } catch (const std::exception& e) {
         std::cerr << "error: " << e.what() << '\n';
@@ -276,8 +283,10 @@ int eval_model(int argc, char** argv) {
     std::string dir = "build/eval";
     int batch = 100;
     for (int i = 3; i + 1 < argc; i += 2) {
-        if (std::strcmp(argv[i], "--data") == 0) dir = argv[i + 1];
-        else if (std::strcmp(argv[i], "--batch") == 0) batch = std::atoi(argv[i + 1]);
+        if (std::strcmp(argv[i], "--data") == 0)
+            dir = argv[i + 1];
+        else if (std::strcmp(argv[i], "--batch") == 0)
+            batch = std::atoi(argv[i + 1]);
     }
     try {
         const ox::Model m = ox::load_model(argv[2]);
@@ -287,23 +296,28 @@ int eval_model(int argc, char** argv) {
         std::ifstream lf(dir + "/test.labels.bin", std::ios::binary | std::ios::ate);
         std::vector<std::int64_t> labels(static_cast<std::size_t>(lf.tellg()) / 8);
         lf.seekg(0);
-        lf.read(reinterpret_cast<char*>(labels.data()), static_cast<std::streamsize>(labels.size() * 8));
+        lf.read(reinterpret_cast<char*>(labels.data()),
+                static_cast<std::streamsize>(labels.size() * 8));
         const std::int64_t per = 3 * 64 * 64;
         const auto n = static_cast<std::int64_t>(labels.size());
 
         auto slice = [&](const std::vector<float>& src, std::int64_t from, std::int64_t count) {
             Tensor t(Shape{count, 3, 64, 64}, tinyinfer::DType::Float32);
-            std::copy(src.begin() + from * per, src.begin() + (from + count) * per, t.data<float>());
+            std::copy(src.begin() + from * per, src.begin() + (from + count) * per,
+                      t.data<float>());
             return t;
         };
         tinyinfer::Graph g(m, {{in->name, Shape{batch, 3, 64, 64}}});
         std::vector<Tensor> calib_batches;
         const auto nc = static_cast<std::int64_t>(calib.size()) / per;
-        for (std::int64_t s = 0; s + batch <= nc; s += batch) calib_batches.push_back(slice(calib, s, batch));
+        for (std::int64_t s = 0; s + batch <= nc; s += batch)
+            calib_batches.push_back(slice(calib, s, batch));
         if (calib_batches.empty()) calib_batches.push_back(slice(calib, 0, batch));  // batch > nc
         const auto t0 = std::chrono::steady_clock::now();
-        const tinyinfer::quant::QuantPlan plan = tinyinfer::quant::calibrate(g, in->name, calib_batches);
-        const double calib_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        const tinyinfer::quant::QuantPlan plan =
+            tinyinfer::quant::calibrate(g, in->name, calib_batches);
+        const double calib_s =
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
 
         tinyinfer::Executor fp(g), q8(g);
         q8.set_int8(&plan);
@@ -331,13 +345,15 @@ int eval_model(int argc, char** argv) {
             seen += batch;
         }
         std::cout << std::fixed << std::setprecision(2) << seen << " test images, batch " << batch
-                  << ", int8 kernel " << tinyinfer::quant::int8_isa() << ", calibration "
-                  << nc << " images in " << calib_s << " s\n"
-                  << "  fp32: accuracy " << 100.0 * static_cast<double>(correct_fp) / static_cast<double>(seen)
-                  << "%, " << ms_fp / static_cast<double>(seen) << " ms/image\n"
-                  << "  int8: accuracy " << 100.0 * static_cast<double>(correct_q8) / static_cast<double>(seen)
-                  << "%, " << ms_q8 / static_cast<double>(seen) << " ms/image ("
-                  << ms_fp / ms_q8 << "x), same top-1 as fp32 on "
+                  << ", int8 kernel " << tinyinfer::quant::int8_isa() << ", calibration " << nc
+                  << " images in " << calib_s << " s\n"
+                  << "  fp32: accuracy "
+                  << 100.0 * static_cast<double>(correct_fp) / static_cast<double>(seen) << "%, "
+                  << ms_fp / static_cast<double>(seen) << " ms/image\n"
+                  << "  int8: accuracy "
+                  << 100.0 * static_cast<double>(correct_q8) / static_cast<double>(seen) << "%, "
+                  << ms_q8 / static_cast<double>(seen) << " ms/image (" << ms_fp / ms_q8
+                  << "x), same top-1 as fp32 on "
                   << 100.0 * static_cast<double>(agree) / static_cast<double>(seen) << "%\n";
     } catch (const std::exception& e) {
         std::cerr << "error: " << e.what() << '\n';

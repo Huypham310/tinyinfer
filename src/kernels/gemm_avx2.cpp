@@ -98,18 +98,26 @@ void skinny_block(int k, const float* a, int lda, const float* bt, int ldbt, flo
     }
 }
 
-void skinny_avx2(int m, int n, int k, const float* a, int lda, const float* bt, int ldbt,
-                 float* c, int ldc) {
+void skinny_avx2(int m, int n, int k, const float* a, int lda, const float* bt, int ldbt, float* c,
+                 int ldc) {
     for (int j0 = 0; j0 < n; j0 += 2) {
         const bool two = n - j0 >= 2;
         int i = 0;
         for (; i + 4 <= m; i += 4) {
-            if (two) skinny_block<4, 2>(k, a + i * lda, lda, bt + j0 * ldbt, ldbt, c + i * ldc + j0, ldc);
-            else skinny_block<4, 1>(k, a + i * lda, lda, bt + j0 * ldbt, ldbt, c + i * ldc + j0, ldc);
+            if (two)
+                skinny_block<4, 2>(k, a + i * lda, lda, bt + j0 * ldbt, ldbt, c + i * ldc + j0,
+                                   ldc);
+            else
+                skinny_block<4, 1>(k, a + i * lda, lda, bt + j0 * ldbt, ldbt, c + i * ldc + j0,
+                                   ldc);
         }
         for (; i < m; ++i) {
-            if (two) skinny_block<1, 2>(k, a + i * lda, lda, bt + j0 * ldbt, ldbt, c + i * ldc + j0, ldc);
-            else skinny_block<1, 1>(k, a + i * lda, lda, bt + j0 * ldbt, ldbt, c + i * ldc + j0, ldc);
+            if (two)
+                skinny_block<1, 2>(k, a + i * lda, lda, bt + j0 * ldbt, ldbt, c + i * ldc + j0,
+                                   ldc);
+            else
+                skinny_block<1, 1>(k, a + i * lda, lda, bt + j0 * ldbt, ldbt, c + i * ldc + j0,
+                                   ldc);
         }
     }
 }

@@ -140,11 +140,16 @@ Attribute parse_attribute(WireReader r) {
     }
     if (a.type == AttrType::Undefined) {
         // very old exporters leave `type` unset; guess from whichever field is filled
-        if (has_t) a.type = AttrType::Tensor;
-        else if (!a.ints.empty()) a.type = AttrType::Ints;
-        else if (!a.floats.empty()) a.type = AttrType::Floats;
-        else if (!a.strings.empty()) a.type = AttrType::Strings;
-        else if (!a.s.empty()) a.type = AttrType::String;
+        if (has_t)
+            a.type = AttrType::Tensor;
+        else if (!a.ints.empty())
+            a.type = AttrType::Ints;
+        else if (!a.floats.empty())
+            a.type = AttrType::Floats;
+        else if (!a.strings.empty())
+            a.type = AttrType::Strings;
+        else if (!a.s.empty())
+            a.type = AttrType::String;
     }
     return a;
 }
@@ -192,9 +197,12 @@ void parse_shape(WireReader r, ValueInfo& v) {
         WireReader dr = r.message();
         while (!dr.done()) {
             const auto df = dr.next();
-            if (df.number == 1) d.value = dr.int64();
-            else if (df.number == 2) d.param = as_string(dr.bytes());
-            else dr.skip(df.type);
+            if (df.number == 1)
+                d.value = dr.int64();
+            else if (df.number == 2)
+                d.param = as_string(dr.bytes());
+            else
+                dr.skip(df.type);
         }
         v.dims.push_back(std::move(d));
     }
@@ -218,9 +226,12 @@ ValueInfo parse_value_info(WireReader r) {
                 WireReader tt = tr.message();
                 while (!tt.done()) {
                     const auto ttf = tt.next();
-                    if (ttf.number == 1) v.elem_type = static_cast<int>(tt.int64());
-                    else if (ttf.number == 2) parse_shape(tt.message(), v);
-                    else tt.skip(ttf.type);
+                    if (ttf.number == 1)
+                        v.elem_type = static_cast<int>(tt.int64());
+                    else if (ttf.number == 2)
+                        parse_shape(tt.message(), v);
+                    else
+                        tt.skip(ttf.type);
                 }
             }
         } else {
@@ -323,8 +334,8 @@ Tensor parse_tensor(WireReader r, std::string* name_out) {
         }
         numel *= static_cast<std::uint64_t>(d);
     }
-    const std::uint64_t have =
-        has_raw ? raw.size() / dtype_size(dtype) : (data_type == kFloat ? floats.size() : ints.size());
+    const std::uint64_t have = has_raw ? raw.size() / dtype_size(dtype)
+                                       : (data_type == kFloat ? floats.size() : ints.size());
     if (have != numel || (has_raw && raw.size() % dtype_size(dtype) != 0)) {
         throw ParseError("tensor '" + name + "' has data for " + std::to_string(have) +
                          " elements, its shape needs " + std::to_string(numel));
@@ -372,9 +383,12 @@ Model parse_model(const std::uint8_t* data, std::size_t size) {
                 std::int64_t version = 0;
                 while (!op.done()) {
                     const auto of = op.next();
-                    if (of.number == 1) domain = as_string(op.bytes());
-                    else if (of.number == 2) version = op.int64();
-                    else op.skip(of.type);
+                    if (of.number == 1)
+                        domain = as_string(op.bytes());
+                    else if (of.number == 2)
+                        version = op.int64();
+                    else
+                        op.skip(of.type);
                 }
                 m.opsets[domain] = version;
                 break;
@@ -430,8 +444,7 @@ const Attribute* typed_attr(const Node& n, std::string_view attr, AttrType want)
     const Attribute* a = n.find_attr(attr);
     if (a != nullptr && a->type != want) {
         throw ParseError(n.op_type + " '" + n.name + "': attribute '" + std::string(attr) +
-                         "' is " + attr_type_name(a->type) + ", expected " +
-                         attr_type_name(want));
+                         "' is " + attr_type_name(a->type) + ", expected " + attr_type_name(want));
     }
     return a;
 }
@@ -464,8 +477,10 @@ std::string ValueInfo::shape_string() const {
     os << '[';
     for (std::size_t i = 0; i < dims.size(); ++i) {
         if (i) os << ", ";
-        if (dims[i].is_static()) os << dims[i].value;
-        else os << (dims[i].param.empty() ? "?" : dims[i].param);
+        if (dims[i].is_static())
+            os << dims[i].value;
+        else
+            os << (dims[i].param.empty() ? "?" : dims[i].param);
     }
     os << ']';
     return os.str();

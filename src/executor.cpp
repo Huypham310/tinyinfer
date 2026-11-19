@@ -24,8 +24,9 @@ std::vector<Tensor> Executor::run(const std::map<std::string, Tensor>& feeds) {
         auto it = feeds.find(values[in].name);
         if (it == feeds.end()) throw GraphError("missing input '" + values[in].name + "'");
         if (it->second.shape() != values[in].shape) {
-            throw GraphError("input '" + values[in].name + "' is " + it->second.shape().to_string() +
-                             ", the graph was built for " + values[in].shape.to_string());
+            throw GraphError("input '" + values[in].name + "' is " +
+                             it->second.shape().to_string() + ", the graph was built for " +
+                             values[in].shape.to_string());
         }
         slot[in] = it->second;
         live += bytes(it->second);
@@ -93,7 +94,8 @@ std::vector<Tensor> Executor::run(const std::map<std::string, Tensor>& feeds) {
         if (n.fused_relu) kernels::relu_inplace(out);
         if (profile_) {
             node_ms_[i] =
-                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0)
+                    .count();
         }
         if (n.kind != OpKind::Reshape && n.kind != OpKind::Identity) live += bytes(out);
         peak_ = std::max(peak_, live);

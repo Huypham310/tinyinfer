@@ -48,7 +48,8 @@ Tensor tensor_from_numpy(const py::array& arr) {
 }
 
 py::array_t<float> numpy_from_tensor(const Tensor& t) {
-    if (t.dtype() != DType::Float32) throw std::invalid_argument("only float32 tensors are exposed");
+    if (t.dtype() != DType::Float32)
+        throw std::invalid_argument("only float32 tensors are exposed");
     const auto& dims = t.shape().dims();
     std::vector<py::ssize_t> shape(dims.begin(), dims.end());
     py::array_t<float> out(shape);
@@ -67,7 +68,8 @@ public:
         input_name_ = feeds[0]->name;
         std::vector<std::int64_t> dims;
         for (const auto& d : feeds[0]->dims) dims.push_back(d.is_static() ? d.value : batch);
-        graph_ = std::make_unique<Graph>(*model_, std::map<std::string, Shape>{{input_name_, Shape{dims}}});
+        graph_ = std::make_unique<Graph>(*model_,
+                                         std::map<std::string, Shape>{{input_name_, Shape{dims}}});
         executor_ = std::make_unique<Executor>(*graph_);
         batch_ = batch;
     }

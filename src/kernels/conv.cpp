@@ -37,8 +37,8 @@ ConvShape check(const Tensor& x, const Tensor& w, const Tensor* bias, const Conv
     s.kw = static_cast<int>(w.shape()[3]);
     if (p.groups < 1 || s.c != s.cg * p.groups || s.oc % p.groups != 0) {
         throw std::invalid_argument("conv2d: " + std::to_string(s.c) + " input channels, weight " +
-                                    w.shape().to_string() + ", groups " +
-                                    std::to_string(p.groups) + " don't fit together");
+                                    w.shape().to_string() + ", groups " + std::to_string(p.groups) +
+                                    " don't fit together");
     }
     if (bias != nullptr && bias->numel() != s.oc) {
         throw std::invalid_argument("conv2d: bias must have one value per output channel");
@@ -59,8 +59,8 @@ void im2col(const float* x, const ConvShape& s, const Conv2dParams& p, float* co
         const float* plane = x + static_cast<std::size_t>(ci) * s.h * s.w;
         for (int ky = 0; ky < s.kh; ++ky) {
             for (int kx = 0; kx < s.kw; ++kx) {
-                float* row = cols + (static_cast<std::size_t>(ci) * s.kh * s.kw + ky * s.kw + kx) *
-                                        ld;
+                float* row =
+                    cols + (static_cast<std::size_t>(ci) * s.kh * s.kw + ky * s.kw + kx) * ld;
                 for (int oy = 0; oy < s.oh; ++oy) {
                     const int iy = oy * p.stride[0] - p.pads[0] + ky * p.dilation[0];
                     float* out = row + oy * s.ow;
@@ -137,8 +137,8 @@ Tensor conv2d(const Tensor& x, const Tensor& w, const Tensor* bias, const Conv2d
         // images write disjoint column blocks, so im2col splits across threads for free. Only a
         // few though: it's memory-bound, and 24 threads here then 4 in the GEMM left 20 of them
         // spinning on SMT siblings: batch-32 layer1 ran 3x slower than single-threaded.
-        const int im2col_threads = std::min(
-            cnt, par::team_size(static_cast<double>(ld) * kdim, kIm2colPerThread));
+        const int im2col_threads =
+            std::min(cnt, par::team_size(static_cast<double>(ld) * kdim, kIm2colPerThread));
         (void)im2col_threads;
         for (int g = 0; g < p.groups; ++g) {
 #pragma omp parallel for schedule(static) num_threads(im2col_threads) if (im2col_threads > 1)
@@ -185,10 +185,13 @@ Tensor conv2d_naive(const Tensor& x, const Tensor& w, const Tensor* bias, const 
                                 if (iy < 0 || iy >= s.h || ix < 0 || ix >= s.w) continue;
                                 const float xv =
                                     xd[((static_cast<std::size_t>(n) * s.c + g * s.cg + ci) * s.h +
-                                        iy) * s.w + ix];
+                                        iy) *
+                                           s.w +
+                                       ix];
                                 const float wv =
                                     wd[((static_cast<std::size_t>(o) * s.cg + ci) * s.kh + ky) *
-                                           s.kw + kx];
+                                           s.kw +
+                                       kx];
                                 acc += static_cast<double>(xv) * wv;
                             }
                     yd[((static_cast<std::size_t>(n) * s.oc + o) * s.oh + oy) * s.ow + ox] =

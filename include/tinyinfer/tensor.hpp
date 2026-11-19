@@ -20,13 +20,21 @@ const char* dtype_name(DType t) noexcept;
 template <class T>
 constexpr DType dtype_of();
 template <>
-constexpr DType dtype_of<float>() { return DType::Float32; }
+constexpr DType dtype_of<float>() {
+    return DType::Float32;
+}
 template <>
-constexpr DType dtype_of<std::int8_t>() { return DType::Int8; }
+constexpr DType dtype_of<std::int8_t>() {
+    return DType::Int8;
+}
 template <>
-constexpr DType dtype_of<std::int32_t>() { return DType::Int32; }
+constexpr DType dtype_of<std::int32_t>() {
+    return DType::Int32;
+}
 template <>
-constexpr DType dtype_of<std::int64_t>() { return DType::Int64; }
+constexpr DType dtype_of<std::int64_t>() {
+    return DType::Int64;
+}
 
 /// Dense, contiguous, row-major tensor on 64-byte aligned memory.
 ///

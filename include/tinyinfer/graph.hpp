@@ -5,8 +5,8 @@
 #include <map>
 #include <optional>
 #include <stdexcept>
-#include <utility>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "tinyinfer/kernels.hpp"
@@ -53,7 +53,7 @@ struct GraphNode {
     bool trans_b = false;
     float alpha = 1.0F, beta = 1.0F, eps = 1e-5F;
     float clip_min = -3.4e38F, clip_max = 3.4e38F;
-    bool keepdims = true;                // GlobalAveragePool from ReduceMean(keepdims=0)
+    bool keepdims = true;                  // GlobalAveragePool from ReduceMean(keepdims=0)
     std::vector<std::int64_t> shape_spec;  // Reshape target, ONNX rules (-1 infers, 0 copies)
     bool allow_zero = false;
     bool fused_relu = false;  // Conv / Add / Gemm followed by a Relu that was folded in
@@ -64,9 +64,9 @@ struct GraphValue {
     std::string name;
     Shape shape;
     bool constant = false;
-    Tensor data;          // constants only
-    int producer = -1;    // node index, -1 for inputs and constants
-    int last_use = -1;    // index (in execution order) of the last node reading it
+    Tensor data;        // constants only
+    int producer = -1;  // node index, -1 for inputs and constants
+    int last_use = -1;  // index (in execution order) of the last node reading it
 };
 
 /// Executable graph: nodes in topological order, every shape known, constants resolved.
