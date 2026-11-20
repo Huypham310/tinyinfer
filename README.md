@@ -1,28 +1,107 @@
 # TinyInfer
 
+[![CI](https://github.com/Huypham310/tinyinfer/actions/workflows/ci.yml/badge.svg)](https://github.com/Huypham310/tinyinfer/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+![C++17](https://img.shields.io/badge/C%2B%2B-17-informational)
+
 A small CPU inference engine for convolutional networks, written in C++17.
 
 TinyInfer loads an ONNX model, builds its own graph representation, plans memory up front, and
 runs it with hand-written kernels. The goal is to understand where inference time actually goes
-on a modern CPU: every kernel starts as a naive loop and is then improved step by step
+on a modern CPU: every kernel started as a naive loop and was improved step by step
 (cache blocking, AVX2 / AVX-512 SIMD, OpenMP threads, operator fusion, INT8 quantization),
-with each step measured against a roofline model of the machine and against ONNX Runtime.
+with each step measured against the machine's FMA peak and against ONNX Runtime.
 
 The reference workload is the ResNet-18 land-use classifier from
-[TerraSense](https://github.com/Huypham310/terrasense).
+[TerraSense](https://github.com/Huypham310/terrasense). It is **not** a replacement for ONNX
+Runtime: on that model TinyInfer is still ~2.6-2.9x slower (see [Benchmarks](#benchmarks)),
+but it matches ONNX Runtime's fp32 accuracy exactly and every step of the way is explained.
 
-> Status: early work in progress.
+## Features
 
-## Planned features
+- **Tensors**: 64-byte aligned storage, `float32` / `int8` / `int32` / `int64`, NCHW and blocked
+  NCHWc layouts ([Tensors](#tensors))
+- **ONNX loader** with its own protobuf wire reader, no libprotobuf, fuzz-style corruption tests
+  ([ONNX loading](#onnx-loading))
+- **Kernels**: GEMM (Goto / BLIS blocking), im2col conv with batching, pooling, batch norm,
+  ReLU, add, softmax ([Kernels](#kernels))
+- **SIMD** micro-kernels for AVX2 and AVX-512 picked at runtime from CPUID, ~90% of the core's
+  FMA peak, plus OpenMP threading with work-based team sizes ([SIMD and threads](#simd-and-threads))
+- **Graph passes**: topological sort, shape inference, BatchNorm folding, ReLU fusion, liveness-based
+  buffer release ([Running a model](#running-a-model))
+- **INT8 post-training quantization** with per-channel weight scales and an AVX-512 VNNI kernel
+  ([INT8 quantization](#int8-quantization))
+- **Benchmarks** (Google Benchmark + end-to-end comparison with ONNX Runtime)
+  ([Benchmarks](#benchmarks))
+- **Python bindings** via pybind11, `pip install .` ([Python](#python))
+- **Tests and CI**: GoogleTest + pytest, ~90% line coverage of `src/`, GitHub Actions and a Docker
+  check image ([Tests](#tests), [CI and Docker](#ci-and-docker))
 
-- Tensor type with aligned storage and NCHW / blocked layouts
-- ONNX loader (protobuf) for the operators ResNet-style models need
-- Kernels: GEMM, im2col + direct convolution, pooling, batch norm, ReLU, add, softmax
-- SIMD paths for AVX2 and AVX-512 chosen at runtime from CPUID
-- Graph passes: conv + bn + relu fusion, constant folding, static buffer reuse
-- INT8 post-training quantization with per-channel weight scales
-- Benchmarks (Google Benchmark) and roofline analysis
-- Python bindings via pybind11
+## Architecture
+
+```mermaid
+flowchart LR
+    subgraph load["Load"]
+        onnx["model.onnx"] --> wire["onnx::WireReader<br/>(protobuf wire format)"]
+        wire --> model["onnx::Model<br/>nodes + initializers"]
+    end
+
+    subgraph plan["Graph (build time)"]
+        model --> graph["Graph<br/>topo sort, shape inference"]
+        graph --> passes["BN folding,<br/>ReLU fusion,<br/>liveness"]
+    end
+
+    subgraph run["Executor (run time)"]
+        passes --> exec["Executor<br/>node by node,<br/>free after last use"]
+        exec --> conv["conv2d<br/>(batched im2col)"]
+        conv --> gemm["gemm<br/>packed Goto / BLIS<br/>or skinny n &lt;= 32"]
+        exec --> ops["pool / add / relu /<br/>softmax / gemm_op"]
+    end
+
+    subgraph isa["Kernels (ISA picked at runtime)"]
+        cpuid["CPUID<br/>cpu_features()"] --> pick{"best ISA"}
+        pick --> avx512["AVX-512 12x32"]
+        pick --> avx2["AVX2 + FMA 6x16"]
+        pick --> scalar["scalar 4x16"]
+        gemm --> pick
+    end
+
+    subgraph int8["INT8 path (optional)"]
+        calib["calibrate():<br/>Conv input ranges"] --> qconv["QConv<br/>s8 weights, u8 activations"]
+        qconv --> vnni["VNNI vpdpbusd<br/>(scalar fallback)"]
+    end
+
+    exec -. "Conv nodes in the plan" .-> qconv
+
+    py["Python Session<br/>(pybind11)"] --> graph
+    py --> exec
+    py --> calib
+    cli["tinyinfer CLI<br/>inspect / run / eval / bench-gemm"] --> graph
+    cli --> exec
+```
+
+Deeper notes (memory planning, GEMM blocking, threading, the INT8 dequantization maths) are in
+[docs/architecture.md](docs/architecture.md).
+
+## Design decisions
+
+- **No libprotobuf.** A model file only needs a handful of message types, and a small hand-written
+  wire reader (~170 lines with its header) keeps the build to CMake + a compiler. It also lets
+  the loader bounds-check every read and hand out zero-copy views into the file buffer.
+- **ISA chosen at runtime.** Only the micro-kernel files are compiled with `-mavx2` / `-mavx512f`;
+  `cpu_features()` reads CPUID on first use, so one binary runs on any x86-64 CPU and
+  `TINYINFER_ISA=scalar|avx2|avx512` can force a path for benchmarks and debugging.
+- **Skinny GEMM for n <= 32.** Late ResNet convs at batch 1 are GEMMs with N = 4 or 16, where a
+  packed 32-wide tile is mostly padding. Those shapes skip packing and compute dot products
+  straight off the weights; `BM_GemmFewColumns` put the crossover at n = 32.
+- **OpenMP team sizes from the work, not the core count.** Every parallel region asks
+  `par::team_size(work, per_thread)` and the cap is one thread per physical core. On this
+  CPU a small GEMM took 410 us with 24 threads and 42 us with 4, because idle threads kept
+  spinning on the SMT siblings of the busy ones.
+- **INT8 with VNNI.** Symmetric per-channel int8 weights, asymmetric uint8 activations, int32
+  accumulation with `vpdpbusd` (64 MACs per instruction), and a scalar kernel over the same
+  packed layout that is tested to agree bit for bit. Only convolutions are quantized; everything
+  between them stays float.
 
 ## Tensors
 
@@ -47,7 +126,7 @@ structs. Weights stored as `raw_data` are copied with one `memcpy` into aligned 
   *before* allocating, so corrupted files fail with `ParseError` instead of crashing or asking
   for terabytes. The tests cut a model at every byte offset and flip random bytes 3,000 times.
 - Weights listed as graph inputs (old exporters) are filtered out of `runtime_inputs()`.
-- Not supported (yet): external data files (models > 2 GB), sparse initializers, subgraphs.
+- Not supported: external data files (models > 2 GB), sparse initializers, subgraphs.
 
 ```text
 $ tinyinfer inspect terrasense/artifacts/model.onnx
@@ -65,13 +144,14 @@ onnx`); set `TINYINFER_RESNET18=/path/to/model.onnx` to also run the full-model 
 
 ## Kernels
 
-Scalar float32 NCHW kernels for everything ResNet-18 needs: `gemm`, `conv2d` (im2col + GEMM,
+float32 NCHW kernels for everything ResNet-18 needs (the scalar versions are the baseline and
+fallback; the SIMD GEMM micro-kernels are in [SIMD and threads](#simd-and-threads)): `gemm`, `conv2d` (im2col + GEMM,
 with stride / asymmetric padding / dilation / groups), `max_pool2d`, `global_avg_pool`,
 inference `batch_norm`, `relu`, `add`, `softmax` and ONNX `Gemm` (`gemm_op`).
 
-- **GEMM** follows the Goto / BLIS loop order: B is packed into 256 x 16 panels (one sliver
-  stays in L1 while the micro-kernel walks down A), A into 64 x 256 blocks (in L2), and a
-  4 x 16 accumulator tile stays in registers. Packing buffers are thread-local and reused, so
+- **GEMM** follows the Goto / BLIS loop order: B is packed into 256 x NR panels (one sliver
+  stays in L1 while the micro-kernel walks down A), A into 96 x 256 blocks (in L2), and an
+  MR x NR accumulator tile stays in registers (4 x 16 scalar, 6 x 16 AVX2, 12 x 32 AVX-512). Packing buffers are thread-local and reused, so
   steady-state calls don't allocate. Edges are zero-padded in the packed copies, so any size
   works.
 - **conv2d** unrolls receptive fields with im2col and calls the GEMM once per image and group;
@@ -90,8 +170,8 @@ $ tinyinfer bench-gemm          # one core, GCC 16 -O3, baseline x86-64 (SSE2), 
 ```
 
 The naive loop falls off a cliff as soon as a column of B stops fitting in cache (every inner
-step jumps a full row); the blocked one holds ~49 GFLOP/s up to 512 and drops at 1024, which
-is the next thing to look at alongside the AVX2 / AVX-512 micro-kernels.
+step jumps a full row); the blocked scalar one holds ~49 GFLOP/s up to 512 and drops at 1024
+in this build. The AVX2 / AVX-512 micro-kernels below hold their speed at that size.
 
 ## SIMD and threads
 
@@ -148,7 +228,8 @@ max |diff| vs reference: 2.38e-07
 
 The reference is ONNX Runtime's output for the same input (`tools/ort_reference.py`); the C++ parity tests cover the three small fixtures (Conv + Relu, Reshape / Gemm / Clip, Conv + BN + Relu + pooling + Gemm + Softmax) and the full ResNet-18 when `TINYINFER_RESNET18` / `TINYINFER_RESNET18_REF` are set.
 
-**Correct first, then fast.** At this point ONNX Runtime ran the model in ~1.8 ms and TinyInfer in ~13.7 ms. `TINYINFER_PROFILE=1` prints per-op times, and the late convolutions dominated: 512 -> 512 channels on a 2 x 2 feature map is a GEMM with M = 512, N = 4, K = 4608, which wastes most of a 12 x 32 tile and re-packs 9.4 MB of weights on every call (~10 GFLOP/s). Profiling also caught a real bug: the GEMM went multithreaded on total work, and these shapes ran **3x slower with 24 threads than with one** (two barriers per k-block, 18 k-blocks). Gating threads on the work between barriers took the model from 34.6 to 13.7 ms. The fixes for the rest are in [Benchmarks](#benchmarks).
+**Correct first, then fast.** The output above is from the first end-to-end version (current
+numbers are in [Benchmarks](#benchmarks)). Back then ONNX Runtime ran the model in ~1.8 ms and TinyInfer in ~13.7 ms. `TINYINFER_PROFILE=1` prints per-op times, and the late convolutions dominated: 512 -> 512 channels on a 2 x 2 feature map is a GEMM with M = 512, N = 4, K = 4608, which wastes most of a 12 x 32 tile and re-packs 9.4 MB of weights on every call (~10 GFLOP/s). Profiling also caught a real bug: the GEMM went multithreaded on total work, and these shapes ran **3x slower with 24 threads than with one** (two barriers per k-block, 18 k-blocks). Gating threads on the work between barriers took the model from 34.6 to 13.7 ms. The fixes for the rest are in [Benchmarks](#benchmarks).
 
 ## INT8 quantization
 
@@ -188,17 +269,17 @@ also the easiest way to get repeatable runs.) Raw Google Benchmark output:
 
 ### ResNet-18 end to end (TerraSense model, 3 x 64 x 64, 4 threads)
 
-| batch | before this phase | now | speed-up | ONNX Runtime | vs ORT |
+| batch | before (INT8 phase) | now | speed-up | ONNX Runtime | vs ORT |
 |---|---|---|---|---|---|
 | 1 | 14.46 ms | 5.12 ms | 2.8x | 1.76 ms | 2.9x slower |
 | 8 | 96.0 ms (12.0 ms/img) | 26.8 ms (3.3 ms/img) | 3.6x | 9.4 ms | 2.8x slower |
 | 32 | 399 ms (12.5 ms/img) | 90.0 ms (2.8 ms/img) | 4.4x | 34.4 ms | 2.6x slower |
 
-"Before" is `main` at the end of the INT8 phase, built and run in the same container. Medians;
+"Before" is the engine as it was right after the INT8 work (before the changes below), built and run in the same container. Medians;
 both engines on 4 threads, which is the fastest setting for both at batch 1 on this CPU
 (ONNX Runtime's default of 12 threads takes 3.1 ms). On the 2,700-image EuroSAT eval
 (`tinyinfer eval`, batch 100) fp32 now takes 3.40 ms/image in the container (10.89 natively on
-Windows before this phase), accuracy unchanged at 98.19%.
+Windows before these changes), accuracy unchanged at 98.19%.
 
 ### What changed
 
@@ -305,7 +386,7 @@ docker run --rm -v "$PWD:/src" -w /src python:3.12 bash scripts/check_linux.sh
 
 Measured in that container (GCC 12, Ryzen AI 9 HX 370 with AVX-512 + VNNI):
 **`src/` line coverage 90.6 % (1,603 of 1,770 lines), 94.2 % of functions** (it was 89.7 % before
-the gap tests of this phase). The lowest files are `graph.cpp` (83 %, mostly shape-inference error
+the extra gap tests). The lowest files are `graph.cpp` (83 %, mostly shape-inference error
 branches), `gemm_avx512.cpp` and `gemm_avx2.cpp` (~87 %, edge-tile paths) and `wire.cpp` (86 %).
 The AVX-512 and VNNI kernel files only count when the CPU actually has those instructions, so on
 an older CPU the number is lower (roughly 5 points); that is why the gate is 85 %, not 90 %.
@@ -361,6 +442,16 @@ pip install clang-format==18.1.8
 git ls-files '*.cpp' '*.hpp' '*.h' | xargs clang-format --dry-run -Werror   # add -i to fix in place
 ```
 
+## Limitations
+
+- Tuned for x86-64 only: the SIMD and VNNI kernels are x86 intrinsics, anything else runs the
+  scalar kernels.
+- Inference only, float32 + INT8 convolutions, `groups = 1` for INT8, batch size fixed per
+  `Graph` / `Session`.
+- Operator coverage is what ResNet-style models need; anything else is a load-time `GraphError`.
+- Still ~2.6-2.9x slower than ONNX Runtime on ResNet-18 (see
+  [Where ONNX Runtime still wins](#where-onnx-runtime-still-wins) for why).
+
 ## License
 
-MIT
+MIT, see [LICENSE](LICENSE).
